@@ -7,107 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-
-<!-- ====== FIREBASE ====== -->
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
-const firebaseConfig = {
-  apiKey: "AIzaSyCQ9wGA6mSUxk38unlhZirAjQ_gLylGz7I",
-  authDomain: "awara-a8a89.firebaseapp.com",
-  projectId: "awara-a8a89",
-  storageBucket: "awara-a8a89.firebasestorage.app",
-  messagingSenderId: "710757319807",
-  appId: "1:710757319807:web:067c96d78351a76b06ab4a"
-};
-
-const fbApp = initializeApp(firebaseConfig);
-const auth = getAuth(fbApp);
-const db = getFirestore(fbApp);
-
-// ---- Auth helpers ----
-window._fbLogin = async (email, password) => {
-  try {
-    await signInWithEmailAndPassword(auth, email, password);
-    const nameId = email.split('@')[0].toLowerCase();
-    const profile = (typeof SEED_USERS !== 'undefined' ? SEED_USERS : []).find(u => u.id === nameId);
-    if (!profile) return { ok: false, error: `Profile untuk "${nameId}" tidak dijumpai. Hubungi Wilson.` };
-    return { ok: true, user: { ...profile } };
-  } catch(e) {
-    let msg = 'Login gagal';
-    if (['auth/wrong-password','auth/invalid-credential','auth/invalid-login-credentials'].includes(e.code)) msg = 'Password salah';
-    else if (e.code === 'auth/user-not-found') msg = 'Email tidak dijumpai. Hubungi Wilson.';
-    else if (e.code === 'auth/too-many-requests') msg = 'Terlalu banyak percubaan. Cuba lagi sebentar.';
-    else msg = 'Login error: ' + e.code;
-    return { ok: false, error: msg };
-  }
-};
-
-window._fbLogout = () => signOut(auth).catch(() => {});
-
-window._fbGetCurrentUser = () => new Promise(resolve => {
-  const unsub = onAuthStateChanged(auth, fbUser => {
-    unsub();
-    if (!fbUser) { resolve(null); return; }
-    const nameId = fbUser.email.split('@')[0].toLowerCase();
-    const profile = (typeof SEED_USERS !== 'undefined' ? SEED_USERS : []).find(u => u.id === nameId);
-    resolve(profile ? { ...profile } : null);
-  });
-});
-
-// ---- Data helpers ----
-window._fbLoadAll = async () => {
-  try {
-    const [casesSnap, actsSnap, metaNotesSnap, metaSeenSnap] = await Promise.all([
-      getDocs(collection(db, 'cases')),
-      getDocs(collection(db, 'activities')),
-      getDoc(doc(db, '_meta', 'notes')).catch(() => null),
-      getDoc(doc(db, '_meta', 'seen')).catch(() => null),
-    ]);
-    return {
-      cases: casesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
-      activities: actsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-      customer_notes: (metaNotesSnap && metaNotesSnap.exists()) ? metaNotesSnap.data() : {},
-      seen: (metaSeenSnap && metaSeenSnap.exists()) ? metaSeenSnap.data() : {},
-    };
-  } catch(e) {
-    console.error('Firestore load error:', e);
-    return { cases: [], activities: [], customer_notes: {}, seen: {} };
-  }
-};
-
-window._fbSetCase = (id, data) =>
-  setDoc(doc(db, 'cases', id), data).catch(e => console.error('Case write fail:', e));
-
-window._fbUpdateCase = (id, updates) =>
-  updateDoc(doc(db, 'cases', id), updates).catch(e => console.error('Case update fail:', e));
-
-window._fbUpdateActivity = (csId, date, updates) => {
-  const actId = csId + '_' + date;
-  setDoc(doc(db, 'activities', actId), { cs_id: csId, date, ...updates }, { merge: true })
-    .catch(e => console.error('Activity write fail:', e));
-};
-
-window._fbSetNote = (key, note) => {
-  const data = {};
-  data[key] = note || null;
-  setDoc(doc(db, '_meta', 'notes'), data, { merge: true })
-    .catch(e => console.error('Note write fail:', e));
-};
-
-window._fbMarkSeen = (userId, key) => {
-  const data = {};
-  data[userId + '_' + key] = Date.now();
-  setDoc(doc(db, '_meta', 'seen'), data, { merge: true })
-    .catch(e => console.error('Seen write fail:', e));
-};
-
-window._fbReady = true;
-console.log('✅ Firebase connected');
-</script>
 <style>
 :root {
   --primary: #0F5132; --primary-light: #1B6B43; --primary-dark: #084025;
@@ -423,6 +322,181 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
 .filter-bar::-webkit-scrollbar { display: none; }
 .filter-chip { padding: 6px 12px; border-radius: 14px; font-size: 11px; font-weight: 700; cursor: pointer; background: var(--cream-2); color: var(--ink-3); border: 1px solid var(--border-2); white-space: nowrap; flex-shrink: 0; }
 .filter-chip.active { background: var(--primary); color: var(--accent); border-color: var(--primary); }
+
+/* ============ RESPONSIVE: Desktop Website Mode ============ */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .app { max-width: 720px; }
+  .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+  .kpi-card.featured { grid-column: span 3; }
+  .targets-grid { grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .awards-grid { grid-template-columns: repeat(3, 1fr); }
+  body { font-size: 16px; }
+}
+
+@media (min-width: 1024px) {
+  body { padding: 0; background: var(--cream-2); }
+  
+  /* Persona bar across top */
+  .persona-bar { 
+    position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+    padding: 10px 24px;
+  }
+  
+  /* App container becomes website with sidebar */
+  .app { 
+    max-width: 1280px; 
+    margin: 0 auto;
+    margin-left: max(0px, calc((100vw - 1280px) / 2));
+    padding-left: 240px;
+    padding-bottom: 40px;
+    padding-top: 50px;
+    min-height: 100vh;
+    box-shadow: none;
+    background: var(--cream);
+    position: relative;
+  }
+  
+  /* Bottom nav becomes left sidebar */
+  .bottom-nav {
+    position: fixed;
+    top: 50px;
+    left: max(0px, calc((100vw - 1280px) / 2));
+    bottom: 0;
+    width: 240px;
+    height: calc(100vh - 50px);
+    padding: 30px 16px;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: stretch;
+    border-top: none;
+    border-right: 1px solid var(--border);
+    background: var(--cream);
+    backdrop-filter: none;
+    box-shadow: 1px 0 0 var(--border-2);
+    gap: 4px;
+    transform: none;
+    max-width: none;
+    z-index: 50;
+  }
+  
+  .bottom-nav::before {
+    content: 'AWARA';
+    font-family: 'Archivo Black', sans-serif;
+    color: var(--accent);
+    background: var(--primary);
+    padding: 12px 16px;
+    border-radius: 10px;
+    text-align: center;
+    font-size: 18px;
+    letter-spacing: 0.03em;
+    margin-bottom: 16px;
+  }
+  
+  .nav-item {
+    flex: 0 0 auto;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-size: 13px;
+    text-align: left;
+  }
+  .nav-item .icon {
+    width: 32px; height: 32px; flex-shrink: 0;
+  }
+  .nav-item.active {
+    background: var(--primary-glow);
+  }
+  .nav-item.active .icon {
+    background: var(--primary);
+  }
+  
+  /* Top bar full width inside content area */
+  .top-bar { 
+    top: 50px;  /* below fixed persona-bar */
+    position: sticky;
+    padding: 24px 32px 18px;
+  }
+  
+  .greeting .name { font-size: 32px; }
+  
+  /* Content area gets larger grids */
+  .kpi-grid { 
+    grid-template-columns: repeat(4, 1fr); 
+    padding: 20px 32px 0;
+    gap: 14px;
+  }
+  .kpi-card.featured { grid-column: span 2; }
+  .kpi-card .value { font-size: 32px; }
+  .kpi-card.featured .value { font-size: 42px; }
+  
+  /* Section padding */
+  .section-header,
+  .targets-card,
+  .month-pill,
+  .info-banner,
+  .commission-card,
+  .team-card,
+  .ranking-card { 
+    margin-left: 32px; 
+    margin-right: 32px; 
+  }
+  .case-list,
+  .stats-list,
+  .awards-grid,
+  .filter-bar,
+  .search-bar,
+  .tabs,
+  .form-page { 
+    padding-left: 32px;
+    padding-right: 32px;
+  }
+  
+  .targets-grid { gap: 32px; }
+  .targets-card { padding: 24px 28px; }
+  
+  /* FAB stays bottom-right floating */
+  .fab {
+    position: fixed;
+    bottom: 30px;
+    right: 30px;
+    left: auto;
+    margin-left: 0;
+    transform: none;
+    width: 60px;
+    height: 60px;
+  }
+  
+  /* Modal stays centered */
+  .modal-overlay { align-items: center; }
+  .modal-sheet {
+    max-width: 560px;
+    border-radius: 20px;
+    max-height: 90vh;
+  }
+  
+  /* Larger awards */
+  .awards-grid { grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .award-card { padding: 20px 12px 18px; }
+  .award-card .winner { font-size: 18px; }
+  .award-card .stat { font-size: 22px; }
+  
+  /* Filter chips bigger */
+  .filter-chip { padding: 8px 16px; font-size: 12px; }
+  
+  /* Case cards spread out */
+  .case-card { padding: 16px 18px; }
+  .case-customer { font-size: 14px; }
+  
+  /* Team cards 2-column on desktop */
+  .team-card { display: inline-block; width: calc(50% - 24px); margin-right: 8px; vertical-align: top; }
+}
+
+@media (min-width: 1280px) {
+  .app { margin-left: auto; margin-right: auto; }
+  .bottom-nav { left: calc((100vw - 1280px) / 2); }
+}
 </style>
 </head>
 <body>
@@ -711,8 +785,8 @@ function generateSeedCases() {
         leader_id: d.leader,
         // Stage 1
         customer_name: customers[custIdx % customers.length],
-        ic: '88' + String(Math.floor(Math.random() * 10000)).padStart(4,'0') + '-08-' + String(Math.floor(Math.random() * 10000)).padStart(4,'0'),
-        phone: '01' + Math.floor(Math.random() * 10) + '-' + String(Math.floor(Math.random() * 10000000)).padStart(7,'0'),
+        ic: '88' + String(Math.floor(Math.random() * 10000)).padStart(4,'0') + '08' + String(Math.floor(Math.random() * 10000)).padStart(4,'0'),
+        phone: '01' + Math.floor(Math.random() * 10) + String(Math.floor(Math.random() * 10000000)).padStart(7,'0'),
         jumlah_pendapatan: pendapatan,
         jumlah_potongan: potongan,
         gaji_bersih: bersih,
@@ -774,167 +848,173 @@ function generateSeedActivities() {
   ];
 }
 
-// ==================== DATA LAYER (Firestore-backed, in-memory cache) ====================
-let CACHE = {
-  users: [...SEED_USERS], // User profiles come from SEED_USERS (roles/teams fixed in code)
-  cases: [],
-  activities: [],
-  customer_notes: {},
-  seen: {},
-  session: null
-};
-
+// ==================== DATA LAYER (localStorage) ====================
 const DB = {
-  K: { users: 'awara_users', cases: 'awara_cases', activities: 'awara_activities', session: 'awara_session', customer_notes: 'awara_customer_notes', seen: 'awara_seen' },
+  K: { 
+    users: 'awara_users', cases: 'awara_cases', activities: 'awara_activities', 
+    session: 'awara_session', customer_notes: 'awara_customer_notes',
+    seen: 'awara_seen'
+  },
   
-  // Load all live data from Firestore into cache
-  async loadAll() {
-    if (!window._fbLoadAll) return;
-    const data = await window._fbLoadAll();
-    CACHE.cases = data.cases;
-    CACHE.activities = data.activities;
-    CACHE.customer_notes = data.customer_notes;
-    // Seen uses flattened keys: "userId_key"
-    const rawSeen = data.seen || {};
-    const seen = {};
-    Object.entries(rawSeen).forEach(([k, v]) => {
-      const parts = k.split('_');
-      if (parts.length >= 2) {
-        const uid = parts[0];
-        const key = parts.slice(1).join('_');
-        if (!seen[uid]) seen[uid] = {};
-        seen[uid][key] = v;
-      }
-    });
-    CACHE.seen = seen;
+  get(key, def = []) {
+    try { return JSON.parse(localStorage.getItem(key)) ?? def; } catch { return def; }
   },
-
-  // ---- Users (from SEED_USERS, not Firestore) ----
-  users() { return CACHE.users; },
-  user(id) { return CACHE.users.find(u => u.id === id); },
+  set(key, val) {
+    try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch { return false; }
+  },
+  
+  seed(force = false) {
+    if (!force && this.get(this.K.users).length > 0) return;
+    this.set(this.K.users, SEED_USERS);
+    this.set(this.K.cases, generateSeedCases());
+    this.set(this.K.activities, generateSeedActivities());
+    this.set(this.K.customer_notes, {});
+    this.set(this.K.seen, {});
+  },
+  
+  // Users
+  users() { return this.get(this.K.users); },
+  user(id) { return this.users().find(u => u.id === id); },
   updateUser(id, updates) {
-    const idx = CACHE.users.findIndex(u => u.id === id);
+    const users = this.users();
+    const idx = users.findIndex(u => u.id === id);
     if (idx === -1) return null;
-    CACHE.users[idx] = { ...CACHE.users[idx], ...updates };
-    return CACHE.users[idx];
+    users[idx] = { ...users[idx], ...updates };
+    this.set(this.K.users, users);
+    return users[idx];
   },
-
-  // ---- Cases ----
-  cases() { return CACHE.cases; },
-  caseById(id) { return CACHE.cases.find(c => c.id === id); },
+  
+  // Cases
+  cases() { return this.get(this.K.cases); },
+  caseById(id) { return this.cases().find(c => c.id === id); },
+  
+  // Find cases by IC (for duplicate check + customer history)
   casesByIC(ic) {
     if (!ic) return [];
     const cleanIC = ic.replace(/[-\s]/g, '').toLowerCase();
-    return CACHE.cases.filter(c => c.ic && c.ic.replace(/[-\s]/g, '').toLowerCase() === cleanIC);
+    return this.cases().filter(c => 
+      c.ic && c.ic.replace(/[-\s]/g, '').toLowerCase() === cleanIC
+    );
   },
+  
   addCase(data) {
+    const cases = this.cases();
     const user = Auth.current();
-    const id = 'c' + Date.now() + Math.random().toString(36).substr(2, 5);
-    const newCase = {
-      id, ...data, createdAt: Date.now(),
-      audit_log: [{ date: new Date().toISOString(), by: user?.id || 'system', action: 'created', changes: { status: { from: null, to: data.status || 'new' } } }]
+    const newCase = { 
+      id: 'c' + Date.now(), 
+      ...data,
+      audit_log: [{
+        date: new Date().toISOString(),
+        by: user?.id || 'system',
+        action: 'created',
+        changes: { status: { from: null, to: data.status || 'new' } }
+      }]
     };
-    CACHE.cases.unshift(newCase);
-    if (window._fbSetCase) window._fbSetCase(id, newCase);
+    cases.unshift(newCase);
+    this.set(this.K.cases, cases);
     return newCase;
   },
+  
   updateCase(id, updates) {
-    const idx = CACHE.cases.findIndex(c => c.id === id);
+    const cases = this.cases();
+    const idx = cases.findIndex(c => c.id === id);
     if (idx === -1) return null;
-    const before = CACHE.cases[idx];
+    const before = cases[idx];
     const user = Auth.current();
+    
+    // Build audit entry for actually changed fields (skip large/timestamp fields)
     const skipFields = ['audit_log', 'remarks'];
     const changes = {};
     Object.keys(updates).forEach(k => {
       if (skipFields.includes(k)) return;
-      if (JSON.stringify(before[k]) !== JSON.stringify(updates[k])) changes[k] = { from: before[k], to: updates[k] };
+      if (JSON.stringify(before[k]) !== JSON.stringify(updates[k])) {
+        changes[k] = { from: before[k], to: updates[k] };
+      }
     });
+    
     if (Object.keys(changes).length > 0) {
       const audit = before.audit_log || [];
-      audit.push({ date: new Date().toISOString(), by: user?.id || 'system', action: 'updated', changes });
+      audit.push({
+        date: new Date().toISOString(),
+        by: user?.id || 'system',
+        action: 'updated',
+        changes
+      });
       updates.audit_log = audit;
     }
-    CACHE.cases[idx] = { ...before, ...updates };
-    if (window._fbUpdateCase) window._fbUpdateCase(id, updates);
-    return CACHE.cases[idx];
+    
+    cases[idx] = { ...before, ...updates };
+    this.set(this.K.cases, cases);
+    return cases[idx];
   },
-
-  // ---- Activities ----
-  activities() { return CACHE.activities; },
+  
+  // Activities (daily targets)
+  activities() { return this.get(this.K.activities); },
   todayActivity(csId) {
-    const today = new Date().toISOString().slice(0, 10);
-    return CACHE.activities.find(a => a.cs_id === csId && a.date === today) ||
-      { cs_id: csId, date: today, calls: 0, whatsapp: 0, payslip: 0 };
+    const today = new Date().toISOString().slice(0,10);
+    return this.activities().find(a => a.cs_id === csId && a.date === today) || 
+           { cs_id: csId, date: today, calls: 0, whatsapp: 0, payslip: 0 };
   },
   updateActivity(csId, updates) {
-    const today = new Date().toISOString().slice(0, 10);
-    const idx = CACHE.activities.findIndex(a => a.cs_id === csId && a.date === today);
+    const today = new Date().toISOString().slice(0,10);
+    const acts = this.activities();
+    const idx = acts.findIndex(a => a.cs_id === csId && a.date === today);
     if (idx >= 0) {
-      CACHE.activities[idx] = { ...CACHE.activities[idx], ...updates };
+      acts[idx] = { ...acts[idx], ...updates };
     } else {
-      CACHE.activities.push({ cs_id: csId, date: today, calls: 0, whatsapp: 0, payslip: 0, ...updates });
+      acts.push({ cs_id: csId, date: today, calls: 0, whatsapp: 0, payslip: 0, ...updates });
     }
-    if (window._fbUpdateActivity) window._fbUpdateActivity(csId, today, updates);
+    this.set(this.K.activities, acts);
   },
-
-  // ---- Customer Notes ----
-  customerNotes() { return CACHE.customer_notes; },
+  
+  // Customer-level notes (keyed by IC, persists across cases)
+  customerNotes() { return this.get(this.K.customer_notes, {}); },
   customerNote(ic) {
     if (!ic) return '';
-    return CACHE.customer_notes[ic.replace(/[-\s]/g, '').toLowerCase()] || '';
+    const key = ic.replace(/[-\s]/g, '').toLowerCase();
+    return this.customerNotes()[key] || '';
   },
   setCustomerNote(ic, note) {
     if (!ic) return;
     const key = ic.replace(/[-\s]/g, '').toLowerCase();
-    if (note) CACHE.customer_notes[key] = note;
-    else delete CACHE.customer_notes[key];
-    if (window._fbSetNote) window._fbSetNote(key, note);
+    const notes = this.customerNotes();
+    if (note) notes[key] = note;
+    else delete notes[key];
+    this.set(this.K.customer_notes, notes);
   },
-
-  // ---- Seen (notification tracking) ----
-  seen() { return CACHE.seen; },
+  
+  // Tracking what user has seen (for notification badges)
+  seen() { return this.get(this.K.seen, {}); },
   markSeen(userId, key) {
-    if (!CACHE.seen[userId]) CACHE.seen[userId] = {};
-    CACHE.seen[userId][key] = Date.now();
-    if (window._fbMarkSeen) window._fbMarkSeen(userId, key);
+    const seen = this.seen();
+    if (!seen[userId]) seen[userId] = {};
+    seen[userId][key] = Date.now();
+    this.set(this.K.seen, seen);
   },
-  lastSeen(userId, key) { return CACHE.seen[userId]?.[key] || 0; },
-
-  // ---- Session (in-memory only) ----
-  session() { return CACHE.session; },
-  setSession(userId) { CACHE.session = { userId, loginAt: Date.now() }; },
-  clearSession() { CACHE.session = null; },
-
-  // Legacy compatibility (used in a few places)
-  set(key, val) {
-    if (key === this.K.users || key === 'awara_users') CACHE.users = val;
+  lastSeen(userId, key) {
+    return this.seen()[userId]?.[key] || 0;
   },
-  get(key, def = []) {
-    if (key === this.K.users) return CACHE.users;
-    if (key === this.K.cases) return CACHE.cases;
-    if (key === this.K.activities) return CACHE.activities;
-    return def;
-  }
+  
+  // Session
+  session() { return this.get(this.K.session, null); },
+  setSession(userId) { this.set(this.K.session, { userId, loginAt: Date.now() }); },
+  clearSession() { localStorage.removeItem(this.K.session); }
 };
 
-// ==================== AUTH (Firebase-backed) ====================
+// ==================== AUTH ====================
 const Auth = {
-  _user: null,
-
-  async doFirebaseLogin(nameId, password) {
-    if (!window._fbLogin) return { ok: false, error: 'Firebase tidak ready. Refresh page.' };
-    const email = nameId.toLowerCase().trim() + '@awara.local';
-    return window._fbLogin(email, password);
+  login(nameId, password) {
+    const user = DB.users().find(u => u.id === nameId.toLowerCase() || u.name.toLowerCase() === nameId.toLowerCase());
+    if (!user) return { ok: false, error: 'Name ID tidak dijumpai' };
+    if (user.password !== password) return { ok: false, error: 'Password salah' };
+    DB.setSession(user.id);
+    return { ok: true, user };
   },
-
-  logout() {
-    this._user = null;
-    CACHE.session = null;
-    if (window._fbLogout) window._fbLogout();
-  },
-
-  current() { return this._user; },
-  setUser(u) { this._user = u; CACHE.session = u ? { userId: u.id, loginAt: Date.now() } : null; }
+  logout() { DB.clearSession(); },
+  current() {
+    const s = DB.session();
+    return s ? DB.user(s.userId) : null;
+  }
 };
 
 // ==================== BUSINESS LOGIC ====================
@@ -1468,9 +1548,36 @@ const App = {
   },
   
   renderPersonaBar() {
-    // Production: no demo persona switcher
     const bar = document.getElementById('persona-bar');
-    if (bar) bar.innerHTML = '';
+    const cur = Auth.current();
+    const showcase = ['anis', 'faizah', 'atirah', 'wilson'];
+    bar.innerHTML = '<span class="lbl">Demo · Login as</span>' + 
+      showcase.map(id => {
+        const u = DB.user(id);
+        const active = cur && cur.id === id ? 'active' : '';
+        return `<button class="${active}" onclick="App.demoSwitch('${id}')">${u.name} · ${u.role}</button>`;
+      }).join('') + 
+      `<button onclick="App.resetDemo()" style="background: rgba(245, 197, 24, 0.2); color: var(--accent-light);">↻ Reset</button>` +
+      (cur ? `<button onclick="App.logout()">Logout</button>` : '');
+  },
+  
+  resetDemo() {
+    if (!confirm('Reset all demo data? (Cases, activities, sessions akan reset balik)')) return;
+    localStorage.removeItem(DB.K.users);
+    localStorage.removeItem(DB.K.cases);
+    localStorage.removeItem(DB.K.activities);
+    localStorage.removeItem(DB.K.session);
+    DB.seed(true);
+    DB.setSession('anis');
+    this.state.currentScreen = 'login';
+    this.render();
+    toast('✓ Demo data reset');
+  },
+  
+  demoSwitch(userId) {
+    DB.setSession(userId);
+    this.state.currentScreen = 'login';  // Will be redirected to default
+    this.render();
   },
   
   logout() {
@@ -1491,18 +1598,18 @@ const App = {
         <form class="login-form" onsubmit="event.preventDefault(); App.doLogin();">
           <div class="input-group">
             <label>Name ID</label>
-            <input type="text" id="login-name" placeholder="e.g. ANIS" style="text-transform: uppercase;" autocomplete="off" autocapitalize="characters">
+            <input type="text" id="login-name" placeholder="e.g. ANIS" style="text-transform: uppercase;" autocomplete="off">
           </div>
           <div class="input-group">
             <label>Password</label>
-            <input type="password" id="login-pass" placeholder="••••••••">
+            <input type="password" id="login-pass" placeholder="••••••••" value="1234">
           </div>
-          <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+          <button type="submit" class="login-btn">Sign In</button>
           <div class="login-error" id="login-error"></div>
         </form>
         <div class="login-footer">
           AWARA Sdn Bhd · Penang Malaysia<br>
-          Masukkan Name ID dan password anda
+          Demo: ANIS / FAIZAH / WILSON · password: 1234
         </div>
       </section>
     `;
@@ -1512,41 +1619,17 @@ const App = {
     document.getElementById('login-name')?.focus();
   },
   
-  async doLogin() {
+  doLogin() {
     const name = document.getElementById('login-name').value.trim();
     const pass = document.getElementById('login-pass').value;
     const err = document.getElementById('login-error');
-    const btn = document.getElementById('login-btn');
-    
-    if (!name || !pass) {
-      err.textContent = 'Sila masukkan Name ID dan Password';
-      err.classList.add('show');
-      return;
-    }
-    
-    btn.textContent = 'Signing in...';
-    btn.disabled = true;
-    err.classList.remove('show');
-    
-    const result = await Auth.doFirebaseLogin(name, pass);
-    
-    btn.textContent = 'Sign In';
-    btn.disabled = false;
-    
+    const result = Auth.login(name, pass);
     if (!result.ok) {
       err.textContent = result.error;
       err.classList.add('show');
       return;
     }
-    
-    // Load all shared data from Firestore
-    btn.textContent = 'Loading data...';
-    btn.disabled = true;
-    await DB.loadAll();
-    btn.textContent = 'Sign In';
-    btn.disabled = false;
-    
-    Auth.setUser(result.user);
+    err.classList.remove('show');
     this.state.currentScreen = this.defaultScreen(result.user);
     this.render();
   },
@@ -1581,6 +1664,30 @@ const App = {
   monthPill() {
     const m = new Date().toLocaleDateString('en-MY', { month: 'long', year: 'numeric' });
     return `<div class="month-pill"><span class="dot"></span> ${m} · Live</div>`;
+  },
+  
+  // Quick card for "new" cases shown on Leader Dashboard - click goes straight to Process Case
+  newCaseQuickCard(c) {
+    const dateStr = new Date(c.date_payslip).toLocaleDateString('en-MY', { day: 'numeric', month: 'short' });
+    const cs = DB.user(c.source_cs_id);
+    return `
+      <div class="case-card" style="border-left: 3px solid var(--accent); background: linear-gradient(160deg, #FFF8E8 0%, var(--cream-2) 100%);">
+        <div class="case-card-top">
+          <div style="flex: 1;">
+            <div class="case-customer">${c.customer_name}</div>
+            <div class="case-package" style="margin-top: 2px;">Phone: ${c.phone || '—'} · IC: ${c.ic || '—'}</div>
+            <div style="font-size: 11px; color: var(--ink-2); margin-top: 4px;">
+              <strong>Bersih ${fmtRM(c.gaji_bersih)} (${c.gaji_bersih_pct.toFixed(0)}%)</strong> · CS: ${cs?.name || '—'} · ${dateStr}
+            </div>
+          </div>
+          <span class="case-status new">New</span>
+        </div>
+        <div style="display: flex; gap: 6px; margin-top: 10px;">
+          <button onclick="event.stopPropagation(); App.openProcessCase('${c.id}')" style="flex: 2; background: var(--primary); color: var(--accent); border: none; padding: 10px; border-radius: 10px; font-family: inherit; font-weight: 800; font-size: 12px; cursor: pointer; letter-spacing: 0.05em; text-transform: uppercase;">+ Add Loan Package (Stage 2)</button>
+          <button onclick="event.stopPropagation(); App.viewCase('${c.id}')" style="flex: 1; background: var(--cream); color: var(--ink-2); border: 1px solid var(--border); padding: 10px; border-radius: 10px; font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;">View</button>
+        </div>
+      </div>
+    `;
   },
   
   // ============ CS DASHBOARD ============
@@ -1818,10 +1925,6 @@ const App = {
     const stage2Done = c.package_id !== null;
     const isAdmin = user.role === 'admin';
     
-    // Phone formatting for tel: and wa.me
-    const cleanPhone = (c.phone || '').replace(/[^0-9]/g, '');
-    const waPhone = cleanPhone.startsWith('0') ? '60' + cleanPhone.substring(1) : cleanPhone;
-    
     const remarksHtml = (c.remarks || []).length === 0 ? '<div style="font-size:12px; color: var(--ink-3); font-style: italic; padding: 4px;">No remarks yet.</div>' :
       (c.remarks || []).map(r => `
         <div style="background: var(--cream); border-left: 3px solid var(--accent); padding: 8px 12px; margin-bottom: 6px; border-radius: 4px;">
@@ -1832,35 +1935,23 @@ const App = {
     
     showModal(`
       <div class="modal-title">${c.customer_name}</div>
-      <div class="modal-sub">${c.ic || '—'}</div>
-      
-      ${c.phone ? `
-        <div class="contact-row">
-          <a class="contact-btn call" href="tel:${cleanPhone}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.13.96.37 1.9.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.91.33 1.85.57 2.81.7A2 2 0 0122 16.92z"/></svg>
-            Call
-          </a>
-          <a class="contact-btn wa" href="https://wa.me/${waPhone}" target="_blank">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.6 6.3A7.85 7.85 0 0012 4a7.95 7.95 0 00-6.8 12L4 21l5.1-1.3a8 8 0 003.9 1h.01c4.4 0 7.95-3.55 7.96-7.95a7.9 7.9 0 00-3.37-6.45zM12 18.16a6.6 6.6 0 01-3.4-.93l-.24-.14-2.5.65.66-2.43-.16-.25a6.55 6.55 0 01-1-3.51 6.6 6.6 0 016.6-6.6c1.77 0 3.43.69 4.67 1.94a6.58 6.58 0 011.93 4.66c0 3.66-2.95 6.6-6.6 6.6zm3.6-4.94c-.2-.1-1.17-.58-1.35-.64s-.31-.1-.45.1c-.13.2-.5.64-.62.77-.11.13-.23.15-.43.05a5.4 5.4 0 01-1.59-.98 6 6 0 01-1.1-1.37c-.12-.2-.01-.3.08-.4.09-.09.2-.23.3-.34.1-.12.13-.2.2-.33.06-.13.03-.25-.02-.35-.05-.1-.45-1.08-.62-1.48-.16-.39-.33-.34-.45-.34-.12 0-.25-.02-.39-.02a.74.74 0 00-.54.25c-.18.2-.7.68-.7 1.66s.72 1.93.82 2.06c.1.13 1.42 2.16 3.43 3.03.48.2.86.33 1.15.43.48.15.93.13 1.28.08.39-.06 1.2-.5 1.37-.97.17-.48.17-.88.12-.97-.05-.09-.18-.14-.38-.24z"/></svg>
-            WhatsApp
-          </a>
-          <a class="contact-btn sms" href="sms:${cleanPhone}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>
-            SMS
-          </a>
-        </div>
-      ` : ''}
+      <div class="modal-sub">IC: ${c.ic || '—'} · Phone: ${c.phone || '—'}</div>
       
       <div style="background: var(--cream-2); border-radius: 12px; padding: 14px; margin: 14px 0; border: 1px solid var(--border-2);">
         <div style="font-size: 10px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px;">Stage 1 · Payslip Info <span class="stage-pill s1">CS: ${csUser?.name || c.source_cs_id}</span></div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px;">
+          <div><span style="color: var(--ink-3);">Phone:</span> <strong>${c.phone || '—'}</strong></div>
+          <div><span style="color: var(--ink-3);">Date:</span> <strong>${new Date(c.date_payslip).toLocaleDateString('en-MY')}</strong></div>
           <div><span style="color: var(--ink-3);">Pendapatan:</span> <strong>${fmtRM(c.jumlah_pendapatan)}</strong></div>
           <div><span style="color: var(--ink-3);">Potongan:</span> <strong>${fmtRM(c.jumlah_potongan)}</strong></div>
           <div><span style="color: var(--ink-3);">Gaji Bersih:</span> <strong style="color: var(--primary);">${fmtRM(c.gaji_bersih)}</strong></div>
           <div><span style="color: var(--ink-3);">Peratus:</span> <strong style="color: var(--primary);">${c.gaji_bersih_pct.toFixed(1)}%</strong></div>
         </div>
-        <div style="font-size: 11px; color: var(--ink-3); margin-top: 8px;">Date Payslip: ${new Date(c.date_payslip).toLocaleDateString('en-MY')}</div>
       </div>
+      
+      ${canProcessStage2 && !stage2Done ? `
+        <button class="submit-btn" style="margin-bottom: 14px; background: var(--accent); color: var(--primary-dark); font-size: 13px;" onclick="App.openProcessCase('${c.id}')">+ Process Case · Add Loan Package (Stage 2)</button>
+      ` : ''}
       
       ${stage2Done ? `
         <div style="background: var(--primary-glow); border-radius: 12px; padding: 14px; margin: 12px 0; border: 1px solid var(--primary);">
@@ -1916,9 +2007,6 @@ const App = {
         </div>
       ` : ''}
       
-      ${canProcessStage2 && !stage2Done ? `
-        <button class="submit-btn" onclick="App.openProcessCase('${c.id}')">Process Case · Stage 2</button>
-      ` : ''}
       ${canProcessStage2 && stage2Done && c.status !== 'disbursed' && c.status !== 'rejected' ? `
         <button class="btn-secondary" onclick="App.openProcessCase('${c.id}')">Edit Stage 2 Details</button>
       ` : ''}
@@ -2594,10 +2682,10 @@ const App = {
       
       ${newCases.length > 0 ? `
         <div class="info-banner" style="background: var(--accent); border-left-color: var(--accent-dark); color: var(--primary-dark);">
-          <strong>${stats.newCount} new payslip${stats.newCount > 1 ? 's' : ''} awaiting your processing.</strong> Tap a card below to add Pakej & start Stage 2.
+          <strong>${stats.newCount} new payslip${stats.newCount > 1 ? 's' : ''} awaiting Stage 2.</strong> Tap below → langsung buka form untuk isi Pakej / Loan / Tenor.
         </div>
         <div class="case-list" style="margin-top: 8px;">
-          ${newCases.map(c => this.caseCard(c)).join('')}
+          ${newCases.map(c => this.newCaseQuickCard(c)).join('')}
           ${stats.newCount > 3 ? `<a class="section-action" style="display: block; text-align: center; padding: 8px;" onclick="App.setFilter('csCases','new'); App.goto('cs-cases')">View all ${stats.newCount} new ></a>` : ''}
         </div>
       ` : ''}
@@ -2951,12 +3039,12 @@ const App = {
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label>IC Number *</label>
-            <input type="text" id="f-ic" placeholder="000000-00-0000" oninput="App.checkDuplicateIC()">
+            <label>IC Number * (12 digits)</label>
+            <input type="text" id="f-ic" placeholder="880515085678" inputmode="numeric" pattern="[0-9]*" maxlength="12" oninput="this.value = this.value.replace(/[^0-9]/g, ''); App.checkDuplicateIC()">
           </div>
           <div class="form-group">
-            <label>Phone *</label>
-            <input type="text" id="f-phone" placeholder="012-3456789">
+            <label>Phone * (digits only)</label>
+            <input type="text" id="f-phone" placeholder="0123456789" inputmode="numeric" pattern="[0-9]*" maxlength="11" oninput="this.value = this.value.replace(/[^0-9]/g, '')">
           </div>
         </div>
         
@@ -3628,8 +3716,9 @@ const App = {
         </select>
       </div>
       
-      <div style="background: var(--info-bg); border-radius: 10px; padding: 10px 12px; font-size: 11px; color: var(--info); margin-bottom: 12px;">
-        ℹ️ Untuk reset password, pergi ke Firebase Console → Authentication → Users
+      <div class="form-group">
+        <label>Reset Password (optional · leave blank to keep)</label>
+        <input type="text" id="eu-pass" placeholder="••••••••">
       </div>
       
       <button class="submit-btn" onclick="App.saveUser('${userId}')">Save Changes</button>
@@ -3642,12 +3731,14 @@ const App = {
     const name = document.getElementById('eu-name').value.trim();
     const role = document.querySelector('#eu-role .case-type-pill.active').dataset.val;
     const leaderId = document.getElementById('eu-leader').value;
+    const pass = document.getElementById('eu-pass').value;
     
     if (!name) { toast('Name required'); return; }
     if (role === 'cs' && !leaderId) { toast('Pilih Team Leader untuk CS'); return; }
     
     const updates = { name, role };
     updates.leader_id = role === 'cs' ? leaderId : null;
+    if (pass) updates.password = pass;
     
     DB.updateUser(userId, updates);
     hideModal();
@@ -3657,7 +3748,8 @@ const App = {
   
   deleteUser(userId) {
     if (!confirm('Delete this staff? (Cases linked to them will keep their name)')) return;
-    CACHE.users = CACHE.users.filter(u => u.id !== userId);
+    const users = DB.users().filter(u => u.id !== userId);
+    DB.set(DB.K.users, users);
     hideModal();
     toast('Staff deleted');
     this.render();
@@ -3671,12 +3763,12 @@ const App = {
       
       <div class="form-group">
         <label>Name *</label>
-        <input type="text" id="nu-name" placeholder="e.g. Ahmad">
+        <input type="text" id="nu-name" placeholder="e.g. Ahmad" autocomplete="off">
       </div>
       
       <div class="form-group">
-        <label>Name ID (login) *</label>
-        <input type="text" id="nu-id" placeholder="e.g. AHMAD" style="text-transform: uppercase;">
+        <label>Name ID (login) — leave blank to auto-generate from name</label>
+        <input type="text" id="nu-id" placeholder="e.g. AHMAD" style="text-transform: uppercase;" autocomplete="off">
       </div>
       
       <div class="form-group">
@@ -3696,41 +3788,90 @@ const App = {
         </select>
       </div>
       
-      <div style="background: var(--warning-bg); border-radius: 10px; padding: 10px 12px; font-size: 11px; color: var(--warning); margin-bottom: 12px;">
-        ⚠️ Selepas create, tambah email + password di Firebase Console → Authentication → Users
+      <div class="form-group">
+        <label>Initial Password</label>
+        <input type="text" id="nu-pass" value="1234" placeholder="Default: 1234">
       </div>
       
-      <button class="submit-btn" onclick="App.createUser()">Create Staff</button>
+      <button class="submit-btn" onclick="App.createUser()" id="nu-submit">Create Staff</button>
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
     `);
+    setTimeout(() => document.getElementById('nu-name')?.focus(), 100);
   },
   
   pickRolePill(el, prefix) {
-    el.parentElement.querySelectorAll('.case-type-pill').forEach(x => x.classList.remove('active'));
-    el.classList.add('active');
-    const lg = document.getElementById(`${prefix}-leader-group`);
-    if (lg) lg.style.display = el.dataset.val === 'cs' ? 'block' : 'none';
+    try {
+      const parent = el.parentElement;
+      parent.querySelectorAll('.case-type-pill').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+      const lg = document.getElementById(`${prefix}-leader-group`);
+      if (lg) lg.style.display = el.dataset.val === 'cs' ? 'block' : 'none';
+    } catch (e) {
+      toast('Error: ' + e.message);
+    }
   },
   
   createUser() {
-    const name = document.getElementById('nu-name').value.trim();
-    let id = document.getElementById('nu-id').value.trim().toLowerCase();
-    const role = document.querySelector('#nu-role .case-type-pill.active').dataset.val;
-    const leaderId = document.getElementById('nu-leader').value;
-    const pass = document.getElementById('nu-pass').value || '1234';
-    
-    if (!name) { toast('Name required'); return; }
-    if (!id) {
-      id = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    try {
+      const nameEl = document.getElementById('nu-name');
+      const idEl = document.getElementById('nu-id');
+      const roleEl = document.querySelector('#nu-role .case-type-pill.active');
+      const leaderEl = document.getElementById('nu-leader');
+      const passEl = document.getElementById('nu-pass');
+      
+      if (!nameEl || !roleEl) { 
+        toast('Form error · pls refresh & try again'); 
+        return; 
+      }
+      
+      const name = nameEl.value.trim();
+      let id = (idEl?.value || '').trim().toLowerCase();
+      const role = roleEl.dataset.val;
+      const leaderId = leaderEl?.value || '';
+      const pass = (passEl?.value || '1234');
+      
+      if (!name) { toast('Name diperlukan'); nameEl.focus(); return; }
+      
+      // Auto-generate ID from name if blank
+      if (!id) {
+        id = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      }
+      
+      // Check duplicate
+      if (DB.user(id)) { 
+        toast('Login ID "' + id.toUpperCase() + '" sudah wujud · sila guna ID lain'); 
+        if (idEl) { idEl.value = id.toUpperCase(); idEl.focus(); }
+        return; 
+      }
+      
+      // Validate CS needs a leader
+      if (role === 'cs' && !leaderId) { 
+        toast('Pilih Team Leader untuk CS'); 
+        leaderEl?.focus();
+        return; 
+      }
+      
+      // Save new user
+      const users = DB.users();
+      users.push({ 
+        id, name, role, 
+        leader_id: role === 'cs' ? leaderId : null, 
+        password: pass 
+      });
+      const ok = DB.set(DB.K.users, users);
+      
+      if (!ok) {
+        toast('Storage error · cuba lagi');
+        return;
+      }
+      
+      hideModal();
+      toast('Staff "' + name + '" created · Login ID: ' + id.toUpperCase());
+      this.render();
+    } catch (e) {
+      console.error('createUser error:', e);
+      toast('Error: ' + (e.message || 'Unknown'));
     }
-    if (DB.user(id)) { toast('Login ID "' + id.toUpperCase() + '" already exists'); return; }
-    if (role === 'cs' && !leaderId) { toast('Pilih Team Leader untuk CS'); return; }
-    
-    const newUser = { id, name, role, leader_id: role === 'cs' ? leaderId : null };
-    CACHE.users.push(newUser);
-    hideModal();
-    toast('Staff "' + name + '" created · Login ID: ' + id.toUpperCase() + ' (Tambah di Firebase Auth juga)');
-    this.render();
   },
   
   // ============ ADMIN: WEEKLY REPORT ============
@@ -4094,32 +4235,24 @@ const App = {
 };
 
 // ==================== INIT ====================
-window.addEventListener('DOMContentLoaded', async () => {
-  // Clear any old localStorage data
-  ['awara_schema_version','awara_users','awara_cases','awara_activities','awara_session','awara_customer_notes','awara_seen'].forEach(k => localStorage.removeItem(k));
-  
-  const app = document.getElementById('app');
-  
-  // Show loading screen while Firebase auth initialises
-  app.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;background:linear-gradient(160deg,#084025 0%,#0F5132 60%,#1B6B43 100%);">
-      <div style="font-family:'Archivo Black',sans-serif;font-size:56px;color:#F5C518;letter-spacing:0.02em;">AWARA</div>
-      <div style="font-size:11px;color:rgba(250,247,240,0.6);letter-spacing:0.25em;text-transform:uppercase;">Loading...</div>
-    </div>
-  `;
-  
-  // Wait a tick to ensure the Firebase module script has initialised
-  await new Promise(r => setTimeout(r, 200));
-  
-  // Check if user is already logged in (Firebase persists sessions)
-  const user = window._fbGetCurrentUser ? await window._fbGetCurrentUser() : null;
-  
-  if (user) {
-    Auth.setUser(user);
-    await DB.loadAll();
-    App.state.currentScreen = App.defaultScreen(user);
+const SCHEMA_VERSION = '5.0';
+
+window.addEventListener('DOMContentLoaded', () => {
+  // Auto-migrate: if old schema detected, reset
+  const ver = localStorage.getItem('awara_schema_version');
+  if (ver !== SCHEMA_VERSION) {
+    localStorage.removeItem(DB.K.users);
+    localStorage.removeItem(DB.K.cases);
+    localStorage.removeItem(DB.K.activities);
+    localStorage.removeItem(DB.K.session);
+    localStorage.setItem('awara_schema_version', SCHEMA_VERSION);
   }
   
+  DB.seed();
+  // Auto-login as Anis for demo if no session
+  if (!Auth.current()) {
+    DB.setSession('anis');
+  }
   App.render();
 });
 </script>
