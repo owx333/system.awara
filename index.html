@@ -7,25 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-:root {
-  --primary: #0F5132; --primary-light: #1B6B43; --primary-dark: #084025;
-  --primary-glow: rgba(15, 81, 50, 0.08);
-  --accent: #F5C518; --accent-light: #FFD93D; --accent-dark: #D4A50E; --accent-deep: #B8900C;
-  --cream: #FAF7F0; --cream-2: #F4EFE3; --cream-3: #ECE5D2;
-  --ink: #1A1A1A; --ink-2: #4A4A4A; --ink-3: #8A8A8A;
-  --border: rgba(15, 81, 50, 0.12); --border-2: rgba(15, 81, 50, 0.06);
-  --success: #2D7A50; --success-bg: #E3F0E8;
-  --warning: #D89B36; --warning-bg: #FBF1DC;
-  --danger: #B8423A; --danger-bg: #F8E3E1;
-  --info: #3B6F9C; --info-bg: #E1ECF6;
-  --shadow-md: 0 4px 20px rgba(15, 81, 50, 0.08);
-}
-* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { overscroll-behavior: none; }
-body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); color: var(--ink); min-height: 100vh; line-height: 1.5; -webkit-font-smoothing: antialiased; font-size: 15px; }
-.serif { font-family: 'Fraunces', serif; }
-.hidden { display: none !important; }
 
 <!-- ====== FIREBASE ====== -->
 <script type="module">
@@ -45,6 +26,107 @@ const firebaseConfig = {
 const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 const db = getFirestore(fbApp);
+
+// ---- Auth helpers ----
+window._fbLogin = async (email, password) => {
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+    const nameId = email.split('@')[0].toLowerCase();
+    const profile = (typeof SEED_USERS !== 'undefined' ? SEED_USERS : []).find(u => u.id === nameId);
+    if (!profile) return { ok: false, error: `Profile untuk "${nameId}" tidak dijumpai. Hubungi Wilson.` };
+    return { ok: true, user: { ...profile } };
+  } catch(e) {
+    let msg = 'Login gagal';
+    if (['auth/wrong-password','auth/invalid-credential','auth/invalid-login-credentials'].includes(e.code)) msg = 'Password salah';
+    else if (e.code === 'auth/user-not-found') msg = 'Email tidak dijumpai. Hubungi Wilson.';
+    else if (e.code === 'auth/too-many-requests') msg = 'Terlalu banyak percubaan. Cuba lagi sebentar.';
+    else msg = 'Login error: ' + e.code;
+    return { ok: false, error: msg };
+  }
+};
+
+window._fbLogout = () => signOut(auth).catch(() => {});
+
+window._fbGetCurrentUser = () => new Promise(resolve => {
+  const unsub = onAuthStateChanged(auth, fbUser => {
+    unsub();
+    if (!fbUser) { resolve(null); return; }
+    const nameId = fbUser.email.split('@')[0].toLowerCase();
+    const profile = (typeof SEED_USERS !== 'undefined' ? SEED_USERS : []).find(u => u.id === nameId);
+    resolve(profile ? { ...profile } : null);
+  });
+});
+
+// ---- Data helpers ----
+window._fbLoadAll = async () => {
+  try {
+    const [casesSnap, actsSnap, metaNotesSnap, metaSeenSnap] = await Promise.all([
+      getDocs(collection(db, 'cases')),
+      getDocs(collection(db, 'activities')),
+      getDoc(doc(db, '_meta', 'notes')).catch(() => null),
+      getDoc(doc(db, '_meta', 'seen')).catch(() => null),
+    ]);
+    return {
+      cases: casesSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+             .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)),
+      activities: actsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+      customer_notes: (metaNotesSnap && metaNotesSnap.exists()) ? metaNotesSnap.data() : {},
+      seen: (metaSeenSnap && metaSeenSnap.exists()) ? metaSeenSnap.data() : {},
+    };
+  } catch(e) {
+    console.error('Firestore load error:', e);
+    return { cases: [], activities: [], customer_notes: {}, seen: {} };
+  }
+};
+
+window._fbSetCase = (id, data) =>
+  setDoc(doc(db, 'cases', id), data).catch(e => console.error('Case write fail:', e));
+
+window._fbUpdateCase = (id, updates) =>
+  updateDoc(doc(db, 'cases', id), updates).catch(e => console.error('Case update fail:', e));
+
+window._fbUpdateActivity = (csId, date, updates) => {
+  const actId = csId + '_' + date;
+  setDoc(doc(db, 'activities', actId), { cs_id: csId, date, ...updates }, { merge: true })
+    .catch(e => console.error('Activity write fail:', e));
+};
+
+window._fbSetNote = (key, note) => {
+  const data = {};
+  data[key] = note || null;
+  setDoc(doc(db, '_meta', 'notes'), data, { merge: true })
+    .catch(e => console.error('Note write fail:', e));
+};
+
+window._fbMarkSeen = (userId, key) => {
+  const data = {};
+  data[userId + '_' + key] = Date.now();
+  setDoc(doc(db, '_meta', 'seen'), data, { merge: true })
+    .catch(e => console.error('Seen write fail:', e));
+};
+
+window._fbReady = true;
+console.log('✅ Firebase connected');
+</script>
+<style>
+:root {
+  --primary: #0F5132; --primary-light: #1B6B43; --primary-dark: #084025;
+  --primary-glow: rgba(15, 81, 50, 0.08);
+  --accent: #F5C518; --accent-light: #FFD93D; --accent-dark: #D4A50E; --accent-deep: #B8900C;
+  --cream: #FAF7F0; --cream-2: #F4EFE3; --cream-3: #ECE5D2;
+  --ink: #1A1A1A; --ink-2: #4A4A4A; --ink-3: #8A8A8A;
+  --border: rgba(15, 81, 50, 0.12); --border-2: rgba(15, 81, 50, 0.06);
+  --success: #2D7A50; --success-bg: #E3F0E8;
+  --warning: #D89B36; --warning-bg: #FBF1DC;
+  --danger: #B8423A; --danger-bg: #F8E3E1;
+  --info: #3B6F9C; --info-bg: #E1ECF6;
+  --shadow-md: 0 4px 20px rgba(15, 81, 50, 0.08);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { overscroll-behavior: none; }
+body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); color: var(--ink); min-height: 100vh; line-height: 1.5; -webkit-font-smoothing: antialiased; font-size: 15px; }
+.serif { font-family: 'Fraunces', serif; }
+.hidden { display: none !important; }
 
 /* Persona switcher (demo only - remove when going production) */
 .persona-bar { position: sticky; top: 0; z-index: 100; background: var(--primary-dark); color: var(--cream); padding: 8px 12px; display: flex; align-items: center; gap: 6px; overflow-x: auto; scrollbar-width: none; font-size: 11px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
