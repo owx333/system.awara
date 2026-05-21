@@ -1560,7 +1560,7 @@ const Logic = {
     const newCount = validPayslip.filter(c => c.status === 'new').length;
     const inProgress = validPayslip.filter(c => ['contacted', 'proposed', 'submitted', 'approved'].includes(c.status)).length;
     // Pipeline = pending contact - the user can see what's "in flight"
-    const inPipeline = validPayslip.filter(c => !['new'].includes(c.status)).length;
+    const inPipeline = validPayslip.filter(c => !['contacted'].includes(c.status)).length;
     const pending = this.pendingCases({ csId }).filter(c => !c.is_duplicate).length;
     const disburseAmount = disburseCases.filter(c => !c.is_duplicate).reduce((s,c) => s + (c.disburse_amount || 0), 0);
     const lostAmount = rejectCases.filter(c => !c.is_duplicate).reduce((s,c) => s + (c.loan_amount || 0), 0);
