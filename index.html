@@ -1448,7 +1448,7 @@ const Auth = {
 
 // ==================== BUSINESS LOGIC ====================
 const Logic = {
-  PIPELINE_STATUSES: ['contacted'],
+  PIPELINE_STATUSES: ['new payslip'],
   KPI_STATUSES: ['submitted', 'approved', 'disbursed'],
   
   isLeaderRole(user) {
@@ -1559,7 +1559,7 @@ const Logic = {
     const rejected = rejectCases.filter(c => !c.is_duplicate).length;
     const newCount = validPayslip.filter(c => c.status === 'new').length;
     const inProgress = validPayslip.filter(c => ['contacted', 'proposed', 'submitted', 'approved'].includes(c.status)).length;
-    // Pipeline = all ACTIVE cases (not disbursed, not rejected) - the user can see what's "in flight"
+    // Pipeline = pending contact - the user can see what's "in flight"
     const inPipeline = validPayslip.filter(c => !['disbursed', 'rejected'].includes(c.status)).length;
     const pending = this.pendingCases({ csId }).filter(c => !c.is_duplicate).length;
     const disburseAmount = disburseCases.filter(c => !c.is_duplicate).reduce((s,c) => s + (c.disburse_amount || 0), 0);
