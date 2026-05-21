@@ -10,119 +10,142 @@
 
 <!-- ============ FIREBASE SDK ============ -->
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
-import { 
-  getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, 
-  onSnapshot, writeBatch, enableIndexedDbPersistence
-} from "https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js";
+window.__firebaseStatus = { stage: 'loading', error: null };
 
-const firebaseConfig = {
-  apiKey: "AIzaSyCQ9wGA6mSUxk38unlhZirAjQ_gLylGz7I",
-  authDomain: "awara-a8a89.firebaseapp.com",
-  projectId: "awara-a8a89",
-  storageBucket: "awara-a8a89.firebasestorage.app",
-  messagingSenderId: "710757319807",
-  appId: "1:710757319807:web:067c96d78351a76b06ab4a"
-};
-
-const fbApp = initializeApp(firebaseConfig);
-const fbDb = getFirestore(fbApp);
-
-// Try to enable offline persistence (so app works without internet)
-try { 
-  await enableIndexedDbPersistence(fbDb); 
-  console.log("Firebase offline persistence enabled");
-} catch (e) { 
-  console.log("Persistence not available (likely multiple tabs open):", e.code); 
+try {
+  const { initializeApp } = await import("https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js");
+  window.__firebaseStatus.stage = 'app-loaded';
+  
+  const { 
+    getFirestore, collection, doc, getDoc, getDocs, setDoc, deleteDoc, 
+    onSnapshot, writeBatch, enableIndexedDbPersistence
+  } = await import("https://www.gstatic.com/firebasejs/12.1.0/firebase-firestore.js");
+  window.__firebaseStatus.stage = 'firestore-loaded';
+  
+  const firebaseConfig = {
+    apiKey: "AIzaSyCQ9wGA6mSUxk38unlhZirAjQ_gLylGz7I",
+    authDomain: "awara-a8a89.firebaseapp.com",
+    projectId: "awara-a8a89",
+    storageBucket: "awara-a8a89.firebasestorage.app",
+    messagingSenderId: "710757319807",
+    appId: "1:710757319807:web:067c96d78351a76b06ab4a"
+  };
+  
+  const fbApp = initializeApp(firebaseConfig);
+  window.__firebaseStatus.stage = 'app-initialized';
+  
+  const fbDb = getFirestore(fbApp);
+  window.__firebaseStatus.stage = 'firestore-initialized';
+  
+  // Persistence - fire and forget (don't block on this; it hangs on iOS Safari Private Mode)
+  enableIndexedDbPersistence(fbDb).then(() => {
+    console.log("Firebase offline persistence enabled");
+  }).catch(e => {
+    console.log("Persistence skipped:", e.code || e.message);
+  });
+  
+  // ========== Cloud API exposed to main script ==========
+  window.Cloud = {
+    enabled: true,
+    connected: false,
+    collections: ['users', 'cases', 'activities', 'customer_notes', 'seen', 'koperasi', 'announcements', 'settings'],
+    listeners: {},
+    
+    async setDoc(collectionName, docId, data) {
+      try {
+        const clean = JSON.parse(JSON.stringify(data));
+        await setDoc(doc(fbDb, collectionName, String(docId)), clean);
+        return true;
+      } catch (e) {
+        console.error("Cloud.setDoc error:", collectionName, docId, e);
+        return false;
+      }
+    },
+    async deleteDoc(collectionName, docId) {
+      try {
+        await deleteDoc(doc(fbDb, collectionName, String(docId)));
+        return true;
+      } catch (e) {
+        console.error("Cloud.deleteDoc error:", e);
+        return false;
+      }
+    },
+    async getAll(collectionName) {
+      try {
+        const snap = await getDocs(collection(fbDb, collectionName));
+        return snap.docs.map(d => d.data());
+      } catch (e) {
+        console.error("Cloud.getAll error:", collectionName, e);
+        return [];
+      }
+    },
+    async getDoc(collectionName, docId) {
+      try {
+        const snap = await getDoc(doc(fbDb, collectionName, String(docId)));
+        return snap.exists() ? snap.data() : null;
+      } catch (e) {
+        console.error("Cloud.getDoc error:", e);
+        return null;
+      }
+    },
+    async batchSet(collectionName, items, keyField = 'id') {
+      try {
+        const batch = writeBatch(fbDb);
+        items.forEach(item => {
+          const cleanItem = JSON.parse(JSON.stringify(item));
+          batch.set(doc(fbDb, collectionName, String(cleanItem[keyField])), cleanItem);
+        });
+        await batch.commit();
+        return true;
+      } catch (e) {
+        console.error("Cloud.batchSet error:", e);
+        return false;
+      }
+    },
+    subscribe(collectionName, callback) {
+      if (this.listeners[collectionName]) this.listeners[collectionName]();
+      this.listeners[collectionName] = onSnapshot(collection(fbDb, collectionName), 
+        snap => {
+          const items = snap.docs.map(d => d.data());
+          callback(items);
+        },
+        err => console.error("Subscribe error:", collectionName, err)
+      );
+    },
+    unsubscribeAll() {
+      Object.values(this.listeners).forEach(fn => fn && fn());
+      this.listeners = {};
+    }
+  };
+  
+  window.Cloud.connected = true;
+  window.__firebaseStatus.stage = 'ready';
+  console.log("Firebase Connected ✅ Project: awara-a8a89");
+  window.dispatchEvent(new Event('cloud-ready'));
+  
+} catch (e) {
+  // Firebase initialization failed - record error + still dispatch event so app boots in local mode
+  window.__firebaseStatus.error = (e && (e.message || String(e))) || 'Unknown error';
+  window.__firebaseStatus.stage = window.__firebaseStatus.stage + '-failed';
+  console.error("❌ Firebase initialization failed:", e);
+  console.error("Stage:", window.__firebaseStatus.stage);
+  
+  // Provide a fake Cloud object so the app doesn't crash when calling Cloud methods
+  window.Cloud = {
+    enabled: false,
+    connected: false,
+    error: window.__firebaseStatus.error,
+    stage: window.__firebaseStatus.stage,
+    setDoc: async () => false,
+    deleteDoc: async () => false,
+    getAll: async () => [],
+    getDoc: async () => null,
+    batchSet: async () => false,
+    subscribe: () => {},
+    unsubscribeAll: () => {}
+  };
+  window.dispatchEvent(new Event('cloud-ready'));
 }
-
-// ========== Cloud API exposed to main script ==========
-window.Cloud = {
-  enabled: true,
-  connected: false,
-  collections: ['users', 'cases', 'activities', 'customer_notes', 'seen'],
-  listeners: {},  // unsubscribe functions
-  
-  async setDoc(collectionName, docId, data) {
-    try {
-      // Sanitize: Firestore doesn't allow undefined values
-      const clean = JSON.parse(JSON.stringify(data));
-      await setDoc(doc(fbDb, collectionName, String(docId)), clean);
-      return true;
-    } catch (e) {
-      console.error("Cloud.setDoc error:", collectionName, docId, e);
-      return false;
-    }
-  },
-  
-  async deleteDoc(collectionName, docId) {
-    try {
-      await deleteDoc(doc(fbDb, collectionName, String(docId)));
-      return true;
-    } catch (e) {
-      console.error("Cloud.deleteDoc error:", e);
-      return false;
-    }
-  },
-  
-  async getAll(collectionName) {
-    try {
-      const snap = await getDocs(collection(fbDb, collectionName));
-      return snap.docs.map(d => d.data());
-    } catch (e) {
-      console.error("Cloud.getAll error:", collectionName, e);
-      return [];
-    }
-  },
-  
-  async getDoc(collectionName, docId) {
-    try {
-      const snap = await getDoc(doc(fbDb, collectionName, String(docId)));
-      return snap.exists() ? snap.data() : null;
-    } catch (e) {
-      console.error("Cloud.getDoc error:", e);
-      return null;
-    }
-  },
-  
-  // Batch upload (faster than many individual setDocs)
-  async batchSet(collectionName, items, keyField = 'id') {
-    try {
-      const batch = writeBatch(fbDb);
-      items.forEach(item => {
-        const cleanItem = JSON.parse(JSON.stringify(item));
-        batch.set(doc(fbDb, collectionName, String(cleanItem[keyField])), cleanItem);
-      });
-      await batch.commit();
-      return true;
-    } catch (e) {
-      console.error("Cloud.batchSet error:", e);
-      return false;
-    }
-  },
-  
-  // Listen for real-time changes
-  subscribe(collectionName, callback) {
-    if (this.listeners[collectionName]) this.listeners[collectionName]();
-    this.listeners[collectionName] = onSnapshot(collection(fbDb, collectionName), 
-      snap => {
-        const items = snap.docs.map(d => d.data());
-        callback(items);
-      },
-      err => console.error("Subscribe error:", collectionName, err)
-    );
-  },
-  
-  unsubscribeAll() {
-    Object.values(this.listeners).forEach(fn => fn && fn());
-    this.listeners = {};
-  }
-};
-
-window.Cloud.connected = true;
-console.log("Firebase Connected ✅ Project: awara-a8a89");
-// Notify main script
-window.dispatchEvent(new Event('cloud-ready'));
 </script>
 <style>
 :root {
@@ -451,7 +474,7 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
 }
 
 @media (min-width: 1024px) {
-  body { padding: 0; background: var(--cream-2); }
+  body { padding: 0; background: var(--cream); margin: 0; }
   
   /* Persona bar across top */
   .persona-bar { 
@@ -459,12 +482,13 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
     padding: 10px 24px;
   }
   
-  /* App container becomes website with sidebar */
+  /* App container fills entire viewport */
   .app { 
-    max-width: 1280px; 
-    margin: 0 auto;
-    margin-left: max(0px, calc((100vw - 1280px) / 2));
+    max-width: none;
+    width: 100%;
+    margin: 0;
     padding-left: 240px;
+    padding-right: 0;
     padding-bottom: 40px;
     padding-top: 50px;
     min-height: 100vh;
@@ -473,15 +497,15 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
     position: relative;
   }
   
-  /* Bottom nav becomes left sidebar */
+  /* Bottom nav becomes left sidebar at viewport's left edge */
   .bottom-nav {
     position: fixed;
     top: 50px;
-    left: max(0px, calc((100vw - 1280px) / 2));
+    left: 0;
     bottom: 0;
     width: 240px;
     height: calc(100vh - 50px);
-    padding: 30px 16px;
+    padding: 24px 14px;
     flex-direction: column;
     justify-content: flex-start;
     align-items: stretch;
@@ -494,6 +518,7 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
     transform: none;
     max-width: none;
     z-index: 50;
+    overflow-y: auto;
   }
   
   .bottom-nav::before {
@@ -506,21 +531,21 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
     text-align: center;
     font-size: 18px;
     letter-spacing: 0.03em;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
   }
   
   .nav-item {
     flex: 0 0 auto;
     flex-direction: row;
     justify-content: flex-start;
-    gap: 14px;
-    padding: 12px 16px;
-    border-radius: 12px;
+    gap: 12px;
+    padding: 11px 14px;
+    border-radius: 10px;
     font-size: 13px;
     text-align: left;
   }
   .nav-item .icon {
-    width: 32px; height: 32px; flex-shrink: 0;
+    width: 28px; height: 28px; flex-shrink: 0;
   }
   .nav-item.active {
     background: var(--primary-glow);
@@ -533,20 +558,21 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
   .top-bar { 
     top: 50px;  /* below fixed persona-bar */
     position: sticky;
-    padding: 24px 32px 18px;
+    padding: 24px 40px 18px;
   }
   
-  .greeting .name { font-size: 32px; }
+  .greeting .name { font-size: 30px; }
   
-  /* Content area gets larger grids */
+  /* Content area gets larger grids - cap inner content for readability on ultra-wide */
   .kpi-grid { 
     grid-template-columns: repeat(4, 1fr); 
-    padding: 20px 32px 0;
+    padding: 20px 40px 0;
     gap: 14px;
+    max-width: 1600px;
   }
   .kpi-card.featured { grid-column: span 2; }
-  .kpi-card .value { font-size: 32px; }
-  .kpi-card.featured .value { font-size: 42px; }
+  .kpi-card .value { font-size: 30px; }
+  .kpi-card.featured .value { font-size: 38px; }
   
   /* Section padding */
   .section-header,
@@ -556,8 +582,9 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
   .commission-card,
   .team-card,
   .ranking-card { 
-    margin-left: 32px; 
-    margin-right: 32px; 
+    margin-left: 40px; 
+    margin-right: 40px; 
+    max-width: 1600px;
   }
   .case-list,
   .stats-list,
@@ -566,8 +593,9 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
   .search-bar,
   .tabs,
   .form-page { 
-    padding-left: 32px;
-    padding-right: 32px;
+    padding-left: 40px;
+    padding-right: 40px;
+    max-width: 1680px;
   }
   
   .targets-grid { gap: 32px; }
@@ -608,11 +636,6 @@ body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--cream); c
   
   /* Team cards 2-column on desktop */
   .team-card { display: inline-block; width: calc(50% - 24px); margin-right: 8px; vertical-align: top; }
-}
-
-@media (min-width: 1280px) {
-  .app { margin-left: auto; margin-right: auto; }
-  .bottom-nav { left: calc((100vw - 1280px) / 2); }
 }
 </style>
 </head>
@@ -5763,14 +5786,91 @@ function tryBoot() {
 
 window.addEventListener('DOMContentLoaded', () => { domReady = true; tryBoot(); });
 window.addEventListener('cloud-ready', () => { cloudReady = true; tryBoot(); });
-// Fallback if cloud-ready doesn't fire within 3s, boot anyway with local data
+
+// Fallback: boot after 8s even if module hasn't loaded
 setTimeout(() => {
   if (!cloudReady) {
-    console.warn("Cloud didn't load within 3s — booting with local data");
+    console.warn("Cloud module didn't load within 8s — booting with local data");
     cloudReady = true;
     tryBoot();
   }
-}, 3000);
+}, 8000);
+
+// Show "Loading..." while waiting
+setTimeout(() => {
+  if (!domReady || !cloudReady) {
+    const el = document.getElementById('app');
+    if (el && !el.innerHTML.trim()) {
+      const status = window.__firebaseStatus || { stage: 'unknown' };
+      el.innerHTML = `
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 80vh; padding: 40px; text-align: center;">
+          <div style="font-family: 'Archivo Black', sans-serif; color: var(--primary); font-size: 32px; margin-bottom: 8px;">AWARA</div>
+          <div style="font-size: 12px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.2em; margin-bottom: 30px;">Connecting to cloud...</div>
+          <div style="width: 40px; height: 40px; border: 3px solid var(--cream-3); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+          <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+          <div style="font-size: 11px; color: var(--ink-3); margin-top: 24px; max-width: 280px; line-height: 1.6;">
+            Stage: ${status.stage}<br>
+            Loading Firebase SDK... If this stays >10s, network may be slow or Firebase domain blocked.
+          </div>
+        </div>
+      `;
+    }
+  }
+}, 2500);
+
+// After boot, check cloud status + show diagnostic banner if failed
+function showCloudDiagnostic() {
+  if (window.Cloud?.connected) return;
+  
+  const fbStatus = window.__firebaseStatus || { stage: 'never-loaded', error: 'Module script never executed (likely blocked or file:// origin)' };
+  const isFileProto = location.protocol === 'file:';
+  
+  // Show only once
+  if (document.getElementById('cloud-diag-banner')) return;
+  
+  const banner = document.createElement('div');
+  banner.id = 'cloud-diag-banner';
+  banner.style.cssText = 'position: fixed; bottom: 20px; right: 20px; left: 20px; max-width: 480px; margin: 0 auto; background: #FCE8E6; border: 2px solid var(--danger); border-radius: 14px; padding: 14px 16px; z-index: 9999; font-family: "Plus Jakarta Sans", sans-serif; box-shadow: 0 8px 24px rgba(0,0,0,0.15);';
+  
+  let hint = '';
+  if (isFileProto) {
+    hint = 'You opened the file directly (<code>file://</code>). Firebase needs a hosted URL. Upload to wilsonooi.com OR use a local server (python -m http.server 8000).';
+  } else if (fbStatus.stage === 'never-loaded' || fbStatus.stage === 'loading') {
+    hint = 'Module script never executed. Likely: <strong>adblock/privacy extension blocking gstatic.com</strong>, OR slow network. Try: disable adblockers, try different browser.';
+  } else if (fbStatus.stage.includes('failed')) {
+    hint = `Failed at stage: <strong>${fbStatus.stage}</strong>. Error: <code>${fbStatus.error}</code>. Check Firestore Security Rules + Authorized Domains in Firebase Console.`;
+  } else {
+    hint = `Stuck at stage: <strong>${fbStatus.stage}</strong>. Check browser console (F12) for errors.`;
+  }
+  
+  banner.innerHTML = `
+    <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px;">
+      <strong style="color: var(--danger); font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 800;">⚠ Cloud Offline · Local Mode Active</strong>
+      <button onclick="document.getElementById('cloud-diag-banner').remove()" style="background: transparent; border: none; color: var(--ink-3); font-size: 16px; cursor: pointer; padding: 0 4px;">×</button>
+    </div>
+    <div style="font-size: 12px; color: var(--ink-2); line-height: 1.5; margin-bottom: 8px;">${hint}</div>
+    <div style="display: flex; gap: 6px;">
+      <button onclick="location.reload()" style="flex: 1; background: var(--primary); color: var(--accent); border: none; padding: 8px; border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;">↻ Reload</button>
+      <button onclick="document.getElementById('cloud-diag-banner').remove()" style="flex: 1; background: var(--cream); color: var(--ink-2); border: 1px solid var(--border); padding: 8px; border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer;">Dismiss · Use Local</button>
+    </div>
+  `;
+  document.body.appendChild(banner);
+}
+
+// Check after boot completes
+setTimeout(() => {
+  if (!window.Cloud?.connected) showCloudDiagnostic();
+}, 9000);
+
+// Cloud status indicator polling
+setInterval(() => {
+  const statusEl = document.getElementById('cloud-status');
+  if (!statusEl) return;
+  const ok = window.Cloud?.connected;
+  statusEl.textContent = ok ? '☁ ✓' : '☁ offline';
+  statusEl.style.background = ok ? 'rgba(46, 125, 50, 0.2)' : 'rgba(184, 66, 58, 0.2)';
+  statusEl.style.color = ok ? '#A5D6A7' : '#FFB4A8';
+}, 2000);
 </script>
 
 </body>
