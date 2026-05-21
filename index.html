@@ -277,6 +277,8 @@ body.app-ready #app { opacity: 1; transition: opacity 0.2s; }
 .case-status.approved { background: var(--success-bg); color: var(--success); }
 .case-status.disbursed { background: var(--primary); color: var(--accent); }
 .case-status.pending { background: #F0E4FF; color: #6B3FB8; }
+.case-status.potential { background: #FFE9D6; color: #C2620C; }
+.case-status.on_hold { background: #E8E8E8; color: #4A4A4A; }
 .case-status.rejected { background: var(--danger-bg); color: var(--danger); }
 
 /* Contact buttons */
@@ -731,9 +733,30 @@ const DEFAULT_SETTINGS = {
       { min: 160000, rate: 0.9 },
       { min: 270000, rate: 1.1 }
     ],
+    // Submit-count based LUMP SUM bonus for Leader/Solo (rejected cases excluded from count)
+    // Awarded once per tier hit (not per submit). Different from cs_submit which is per-case rate.
+    leader_submit: [
+      { min: 7, lump: 140 },
+      { min: 11, lump: 420 },
+      { min: 15, lump: 910 },
+      { min: 19, lump: 1120 },
+      { min: 25, lump: 1610 }
+    ],
+    solo_submit: [
+      { min: 7, lump: 140 },
+      { min: 11, lump: 420 },
+      { min: 15, lump: 910 },
+      { min: 19, lump: 1120 },
+      { min: 25, lump: 1610 }
+    ],
     bonus_team: 70000,
     bonus_solo: 35000,
-    bonus_rate: 1.0  // %
+    bonus_rate: 1.0,  // %
+    // Per-package bonuses (Boss configurable). Example structure - actual data in settings
+    bonus_packages: [
+      { package_id: 'ytaa', threshold_team: 70000, threshold_solo: 35000, rate_pct: 1.0 },
+      { package_id: 'komuja', threshold_team: 70000, threshold_solo: 35000, rate_pct: 1.0 }
+    ]
   },
   daily_targets: { calls: 250, whatsapp: 30, payslip: 3 },
   performance: {
@@ -782,9 +805,12 @@ let CS_PAYSLIP_TIERS = [];
 let CS_SUBMIT_TIERS = [];
 let LEADER_KFI_TIERS = [];
 let SOLO_KFI_TIERS = [];
+let LEADER_SUBMIT_TIERS = [];  // lump-sum bonus by submit count (item 3)
+let SOLO_SUBMIT_TIERS = [];     // lump-sum bonus by submit count (item 4)
 let YTAA_KOMUJA_BONUS_TEAM = DEFAULT_SETTINGS.commission.bonus_team;
 let YTAA_KOMUJA_BONUS_SOLO = DEFAULT_SETTINGS.commission.bonus_solo;
 let BONUS_RATE_PCT = DEFAULT_SETTINGS.commission.bonus_rate;
+let BONUS_PACKAGES = (DEFAULT_SETTINGS.commission.bonus_packages || []).slice();  // per-package bonus rules (item 9)
 let DAILY_TARGETS = { ...DEFAULT_SETTINGS.daily_targets };
 let PERFORMANCE = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.performance));
 let PENDING_REASONS = DEFAULT_SETTINGS.pending_reasons.slice();
@@ -817,6 +843,15 @@ function refreshSettings() {
   if (s.commission.solo_kfi?.length) {
     SOLO_KFI_TIERS = sortDesc(s.commission.solo_kfi).map(t => ({ ...t, label: buildTierLabel(t, 'kfi') }));
   }
+  if (s.commission.leader_submit?.length) {
+    LEADER_SUBMIT_TIERS = sortDesc(s.commission.leader_submit).map(t => ({ ...t, label: buildTierLabel(t, 'submit') }));
+  }
+  if (s.commission.solo_submit?.length) {
+    SOLO_SUBMIT_TIERS = sortDesc(s.commission.solo_submit).map(t => ({ ...t, label: buildTierLabel(t, 'submit') }));
+  }
+  if (Array.isArray(s.commission.bonus_packages)) {
+    BONUS_PACKAGES = s.commission.bonus_packages.slice();
+  }
   if (typeof s.commission.bonus_team === 'number') YTAA_KOMUJA_BONUS_TEAM = s.commission.bonus_team;
   if (typeof s.commission.bonus_solo === 'number') YTAA_KOMUJA_BONUS_SOLO = s.commission.bonus_solo;
   if (typeof s.commission.bonus_rate === 'number') BONUS_RATE_PCT = s.commission.bonus_rate;
@@ -839,9 +874,11 @@ CS_PAYSLIP_TIERS = DEFAULT_SETTINGS.commission.cs_payslip.slice().sort((a,b) => 
 CS_SUBMIT_TIERS = DEFAULT_SETTINGS.commission.cs_submit.slice().sort((a,b) => b.min - a.min).map(t => ({ ...t, label: buildTierLabel(t, 'submit') }));
 LEADER_KFI_TIERS = DEFAULT_SETTINGS.commission.leader_kfi.slice().sort((a,b) => b.min - a.min).map(t => ({ ...t, label: buildTierLabel(t, 'kfi') }));
 SOLO_KFI_TIERS = DEFAULT_SETTINGS.commission.solo_kfi.slice().sort((a,b) => b.min - a.min).map(t => ({ ...t, label: buildTierLabel(t, 'kfi') }));
+LEADER_SUBMIT_TIERS = DEFAULT_SETTINGS.commission.leader_submit.slice().sort((a,b) => b.min - a.min).map(t => ({ ...t, label: buildTierLabel(t, 'submit') }));
+SOLO_SUBMIT_TIERS = DEFAULT_SETTINGS.commission.solo_submit.slice().sort((a,b) => b.min - a.min).map(t => ({ ...t, label: buildTierLabel(t, 'submit') }));
 
 // Status flow (still hardcoded — changing this needs developer review)
-const STATUSES = ['new', 'contacted', 'proposed', 'submitted', 'approved', 'disbursed', 'pending', 'rejected'];
+const STATUSES = ['new', 'contacted', 'proposed', 'submitted', 'approved', 'disbursed', 'pending', 'potential', 'on_hold', 'rejected'];
 const STATUS_LABELS = {
   new: 'New Payslip',
   contacted: 'Contacted',
@@ -850,16 +887,20 @@ const STATUS_LABELS = {
   approved: 'Approved',
   disbursed: 'Disbursed',
   pending: 'Pending',
+  potential: 'Potential',     // hot lead worth chasing
+  on_hold: 'On Hold',          // temporarily paused (customer travel, awaiting docs, etc)
   rejected: 'Rejected'
 };
 const STATUS_FLOW = {
-  new:        ['contacted', 'pending', 'rejected'],
-  contacted:  ['proposed', 'pending', 'rejected'],
-  proposed:   ['submitted', 'pending', 'rejected'],
-  submitted:  ['approved', 'pending', 'rejected'],
-  approved:   ['disbursed', 'pending', 'rejected'],
+  new:        ['contacted', 'potential', 'on_hold', 'pending', 'rejected'],
+  contacted:  ['proposed', 'potential', 'on_hold', 'pending', 'rejected'],
+  proposed:   ['submitted', 'potential', 'on_hold', 'pending', 'rejected'],
+  submitted:  ['approved', 'on_hold', 'pending', 'rejected'],
+  approved:   ['disbursed', 'on_hold', 'pending', 'rejected'],
   disbursed:  [],
-  pending:    ['contacted', 'proposed', 'submitted', 'approved', 'rejected'],
+  pending:    ['contacted', 'proposed', 'submitted', 'approved', 'potential', 'on_hold', 'rejected'],
+  potential:  ['contacted', 'proposed', 'submitted', 'on_hold', 'rejected'],   // can move forward or pause
+  on_hold:    ['contacted', 'proposed', 'submitted', 'approved', 'potential', 'rejected'],
   rejected:   ['new']
 };
 
@@ -881,6 +922,7 @@ function calcGajiBersih(pendapatan, potongan) {
 const ROLE_LABELS = { 
   admin: 'Boss', 
   manager: 'Manager',
+  kerani: 'Admin',   // customer-view-only role (clerk/office admin)
   leader: 'Team Leader', 
   solo: 'Solo Leader', 
   cs: 'CS' 
@@ -888,6 +930,7 @@ const ROLE_LABELS = {
 
 // ============ PERMISSIONS MATRIX ============
 // Centralized permission checks. Use everywhere instead of hardcoded role checks.
+// Role hierarchy: admin(Boss) > manager > kerani(Admin) > leader/solo > cs
 const Permissions = {
   // Can DELETE customer data, settings, users — Boss only
   canDelete: u => u?.role === 'admin',
@@ -895,33 +938,38 @@ const Permissions = {
   // Can see Ranking screens (monthly leaderboard, awards, etc.) — Boss + Manager only
   canSeeRanking: u => u?.role === 'admin' || u?.role === 'manager',
   
-  // Can EDIT customer info (Stage 1 fields like name/IC/phone/salary) — Boss + Manager + Leader + Solo
-  // CS can only edit their own freshly-created cases (handled by case-level logic)
-  canEditCustomerInfo: u => ['admin', 'manager', 'leader', 'solo'].includes(u?.role),
+  // Can EDIT customer info (Stage 1 fields like name/IC/phone/salary)
+  // Boss + Manager + Kerani (Admin) + Leader + Solo
+  canEditCustomerInfo: u => ['admin', 'manager', 'kerani', 'leader', 'solo'].includes(u?.role),
   
-  // Can edit ANY case (stage 3, status updates) regardless of who owns it — Boss + Manager + Leader (their team) + Solo (their own)
+  // Can edit ANY case (stage 3, status updates) regardless of who owns it — Boss + Manager only
+  // (Kerani can edit info but not status flow)
   canEditAllCases: u => ['admin', 'manager'].includes(u?.role),
   
-  // Can manage Staff (add/edit/delete users) — Boss + Manager (no delete for Manager)
+  // Can manage Staff (add/edit/delete users) — Boss + Manager
   canManageStaff: u => ['admin', 'manager'].includes(u?.role),
   
   // Can manage Koperasi packages — Boss + Manager
   canManageKoperasi: u => ['admin', 'manager'].includes(u?.role),
   
-  // Can change System Settings (commission tiers etc.) — Boss only
+  // Can change System Settings — Boss only
   canEditSettings: u => u?.role === 'admin',
   
   // Can post Announcements — Boss + Manager
   canAnnounce: u => ['admin', 'manager'].includes(u?.role),
   
-  // Can export reports — Boss + Manager
-  canExport: u => ['admin', 'manager'].includes(u?.role),
+  // Can export reports — Boss + Manager (Kerani can export customer data too)
+  canExport: u => ['admin', 'manager', 'kerani'].includes(u?.role),
   
-  // Does the user have an admin-like dashboard? — Boss + Manager (Manager = Boss minus delete)
-  isAdminLevel: u => ['admin', 'manager'].includes(u?.role),
+  // Does the user have an admin-like dashboard? — Boss + Manager + Kerani
+  // Kerani gets a SLIMMED-DOWN admin dashboard (customers only)
+  isAdminLevel: u => ['admin', 'manager', 'kerani'].includes(u?.role),
   
-  // Can see all cases across teams (not just own/team) — Boss + Manager
-  canSeeAllCases: u => ['admin', 'manager'].includes(u?.role)
+  // Can see all cases across teams — Boss + Manager + Kerani
+  canSeeAllCases: u => ['admin', 'manager', 'kerani'].includes(u?.role),
+  
+  // Kerani-specific: limited to customer board only (no rankings/staff/settings/etc)
+  isKeraniOnly: u => u?.role === 'kerani'
 };
 
 // ==================== USERS (14 staff + 1 admin) ====================
@@ -1669,6 +1717,7 @@ const Logic = {
     const stats = this.leaderStats(leaderId);
     const tiers = stats.isSolo ? SOLO_KFI_TIERS : LEADER_KFI_TIERS;
     
+    // KFI commission (% of disburse)
     let rate = 0, tier = null;
     for (const t of tiers) {
       if (stats.kfiAmount >= t.min) { rate = t.rate; tier = t; break; }
@@ -1682,13 +1731,73 @@ const Logic = {
       if (upper) nextTier = { ...upper, need: upper.min - stats.kfiAmount };
     }
     
-    const bonusThreshold = stats.isSolo ? YTAA_KOMUJA_BONUS_SOLO : YTAA_KOMUJA_BONUS_TEAM;
-    const bonusCom = stats.bonusKfi >= bonusThreshold ? stats.bonusKfi * (BONUS_RATE_PCT / 100) : 0;
+    // Submit lump-sum bonus (item 3 + 4) - count SUBMITTED cases that are NOT rejected this month
+    // KPI = cases that were submitted to koperasi AND still in active flow (not rejected)
+    const submitTiers = stats.isSolo ? SOLO_SUBMIT_TIERS : LEADER_SUBMIT_TIERS;
+    const submitCases = this.monthlySubmitCases({ leaderId });
+    // Exclude rejected cases from the count (item 4: 当月reject的话就不算kpi)
+    const validKpi = submitCases.filter(c => !c.is_duplicate && c.status !== 'rejected').length;
+    let submitLump = 0, submitTier = null;
+    for (const t of submitTiers) {
+      if (validKpi >= t.min) { submitLump = t.lump || 0; submitTier = t; break; }
+    }
+    let nextSubmitTier = null;
+    if (!submitTier && submitTiers.length) {
+      nextSubmitTier = { ...submitTiers[submitTiers.length - 1], need: submitTiers[submitTiers.length - 1].min - validKpi };
+    } else if (submitTier) {
+      const upper = submitTiers.find(t => t.min > submitTier.min);
+      if (upper) nextSubmitTier = { ...upper, need: upper.min - validKpi };
+    }
+    
+    // Per-package bonus (item 9) - replaces fixed YTAA/KOMUJA
+    // For each bonus_package, check disburse amount for that package this month
+    let bonusCom = 0;
+    const bonusBreakdown = [];
+    const allDisburseCases = this.monthlyDisburseCases({ leaderId }).filter(c => !c.is_duplicate);
+    
+    if (BONUS_PACKAGES && BONUS_PACKAGES.length > 0) {
+      for (const bp of BONUS_PACKAGES) {
+        const pkgCases = allDisburseCases.filter(c => c.package_id === bp.package_id);
+        const pkgAmount = pkgCases.reduce((s,c) => s + (c.disburse_amount || 0), 0);
+        const threshold = stats.isSolo ? (bp.threshold_solo || 0) : (bp.threshold_team || 0);
+        const rate = bp.rate_pct || 0;
+        if (pkgAmount >= threshold && threshold > 0) {
+          const earned = pkgAmount * (rate / 100);
+          bonusCom += earned;
+          bonusBreakdown.push({
+            package_id: bp.package_id,
+            amount: pkgAmount,
+            threshold,
+            rate,
+            earned
+          });
+        } else if (pkgAmount > 0) {
+          // Track packages with disburse but didn't hit threshold (for showing "almost there")
+          bonusBreakdown.push({
+            package_id: bp.package_id,
+            amount: pkgAmount,
+            threshold,
+            rate,
+            earned: 0,
+            shortfall: threshold - pkgAmount
+          });
+        }
+      }
+    } else {
+      // Fallback: legacy YTAA + KOMUJA fixed bonus (if no bonus_packages configured)
+      const bonusThreshold = stats.isSolo ? YTAA_KOMUJA_BONUS_SOLO : YTAA_KOMUJA_BONUS_TEAM;
+      bonusCom = stats.bonusKfi >= bonusThreshold ? stats.bonusKfi * (BONUS_RATE_PCT / 100) : 0;
+    }
     
     return {
-      kfiCom, bonusCom, total: kfiCom + bonusCom,
+      kfiCom, bonusCom, submitLump,
+      total: kfiCom + bonusCom + submitLump,
       rate, tier, nextTier, tiers,
-      bonusKfi: stats.bonusKfi, bonusThreshold, bonusEarned: stats.bonusKfi >= bonusThreshold,
+      submitTier, nextSubmitTier, submitTiers, validKpi,
+      bonusBreakdown,
+      bonusKfi: stats.bonusKfi,
+      bonusThreshold: stats.isSolo ? YTAA_KOMUJA_BONUS_SOLO : YTAA_KOMUJA_BONUS_TEAM,
+      bonusEarned: bonusCom > 0,
       stats
     };
   },
@@ -2014,6 +2123,7 @@ const App = {
   },
   
   defaultScreen(user) {
+    if (user.role === 'kerani') return 'admin-customers';   // Admin (kerani) only sees customers
     if (Permissions.isAdminLevel(user)) return 'admin-dashboard';
     if (Logic.isLeaderRole(user)) return 'leader-dashboard';
     return 'cs-dashboard';
@@ -2340,15 +2450,47 @@ const App = {
   // ============ CS CASES LIST ============
   renderCSCases(user) {
     const filterStatus = this.state.filterState.csCases || 'all';
+    const filterTime = this.state.filterState.csCasesTime || 'month';
     const isLeader = Logic.isLeaderRole(user);
     const searchText = (this.state.searchTextCS || '').toLowerCase();
+    const dateFrom = this.state.dateFromCS || '';
+    const dateTo = this.state.dateToCS || '';
+    
+    // Get base cases (mine or team)
     let cases;
     if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
-      cases = Logic.leaderStats(user.id).cases;
+      // Use ALL cases from team, not just monthly
+      cases = DB.cases().filter(c => c.leader_id === user.id || c.source_cs_id === user.id);
+    } else if (isLeader) {
+      cases = DB.cases().filter(c => c.source_cs_id === user.id || c.leader_id === user.id);
     } else {
-      cases = Logic.csStats(user.id).cases;
+      cases = DB.cases().filter(c => c.source_cs_id === user.id);
     }
+    
+    // Date range filter (overrides time chip if either set)
+    if (dateFrom && dateTo) {
+      cases = cases.filter(c => c.date_payslip >= dateFrom && c.date_payslip <= dateTo);
+    } else if (dateFrom) {
+      cases = cases.filter(c => c.date_payslip >= dateFrom);
+    } else if (dateTo) {
+      cases = cases.filter(c => c.date_payslip <= dateTo);
+    } else {
+      // Time chip filter
+      if (filterTime === 'month') {
+        const ym = new Date().toISOString().slice(0,7);
+        cases = cases.filter(c => c.date_payslip && c.date_payslip.startsWith(ym));
+      } else if (filterTime === '3months') {
+        const cutoff = new Date();
+        cutoff.setMonth(cutoff.getMonth() - 3);
+        cases = cases.filter(c => c.date_payslip && new Date(c.date_payslip) >= cutoff);
+      }
+      // 'all' = no time filter
+    }
+    
+    // Status filter
     if (filterStatus !== 'all') cases = cases.filter(c => c.status === filterStatus);
+    
+    // Search
     if (searchText) {
       cases = cases.filter(c => 
         c.customer_name.toLowerCase().includes(searchText) ||
@@ -2356,6 +2498,7 @@ const App = {
         (c.phone || '').toLowerCase().includes(searchText)
       );
     }
+    
     cases = cases.sort((a,b) => b.date_payslip.localeCompare(a.date_payslip));
     
     const tabs = isLeader ? `
@@ -2372,17 +2515,47 @@ const App = {
                oninput="App.setSearchCS(this.value)">
       </div>
       
+      <!-- Date Range Filter -->
+      <div style="padding: 0 20px 12px; display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-end;">
+        <div style="flex: 1; min-width: 130px;">
+          <label style="display: block; font-size: 10px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">Date From</label>
+          <input type="date" value="${dateFrom}" oninput="App.setDateFilterCS('from', this.value)" style="width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border-2); font-family: inherit; font-size: 12px;">
+        </div>
+        <div style="flex: 1; min-width: 130px;">
+          <label style="display: block; font-size: 10px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 4px;">Date To</label>
+          <input type="date" value="${dateTo}" oninput="App.setDateFilterCS('to', this.value)" style="width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border-2); font-family: inherit; font-size: 12px;">
+        </div>
+        ${(dateFrom || dateTo) ? `<button onclick="App.clearDateFilterCS()" style="padding: 8px 12px; background: var(--cream-2); color: var(--ink-2); border: 1px solid var(--border); border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 11px; cursor: pointer;">✕ Clear</button>` : ''}
+      </div>
+      
       <div class="filter-bar">
-        ${['all','new','contacted','proposed','submitted','approved','disbursed','pending','rejected'].map(s => 
+        <div class="filter-chip ${(filterTime === 'month' && !dateFrom && !dateTo) ? 'active' : ''}" onclick="App.setFilter('csCasesTime','month'); App.clearDateFilterCS(true)">This Month</div>
+        <div class="filter-chip ${(filterTime === '3months' && !dateFrom && !dateTo) ? 'active' : ''}" onclick="App.setFilter('csCasesTime','3months'); App.clearDateFilterCS(true)">3 Months</div>
+        <div class="filter-chip ${(filterTime === 'all' && !dateFrom && !dateTo) ? 'active' : ''}" onclick="App.setFilter('csCasesTime','all'); App.clearDateFilterCS(true)">All Time</div>
+      </div>
+      
+      <div class="filter-bar">
+        ${['all','new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected'].map(s => 
           `<div class="filter-chip ${filterStatus === s ? 'active' : ''}" onclick="App.setFilter('csCases','${s}')">${s === 'all' ? 'All' : STATUS_LABELS[s]}</div>`
         ).join('')}
       </div>
-      <div style="padding: 8px 20px; font-size: 11px; color: var(--ink-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em;">${cases.length} cases · ${filterStatus === 'all' ? 'this month' : STATUS_LABELS[filterStatus]}</div>
+      <div style="padding: 8px 20px; font-size: 11px; color: var(--ink-3); font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em;">${cases.length} cases</div>
       <div class="case-list">
         ${cases.length === 0 ? this.emptyState('No cases match.') :
           cases.map(c => this.caseCard(c)).join('')}
       </div>
     `;
+  },
+  
+  setDateFilterCS(which, value) {
+    if (which === 'from') this.state.dateFromCS = value;
+    if (which === 'to') this.state.dateToCS = value;
+    this.render();
+  },
+  clearDateFilterCS(silent) {
+    this.state.dateFromCS = '';
+    this.state.dateToCS = '';
+    if (!silent) this.render();
   },
   
   setSearchCS(val) {
@@ -2847,6 +3020,8 @@ const App = {
     if (newStatus === 'approved') return this.openApproveForm(caseId);
     if (newStatus === 'disbursed') return this.openDisburseForm(caseId);
     if (newStatus === 'pending') return this.openPendingForm(caseId);
+    if (newStatus === 'potential') return this.openPotentialForm(caseId);
+    if (newStatus === 'on_hold') return this.openOnHoldForm(caseId);
     if (newStatus === 'rejected') return this.openRejectForm(caseId);
     
     // Simple transitions (new → contacted, etc.)
@@ -2861,6 +3036,78 @@ const App = {
     DB.updateCase(caseId, updates);
     hideModal();
     toast('Status: ' + STATUS_LABELS[newStatus]);
+    this.render();
+  },
+  
+  // Potential — mark as hot lead with reason / followup note
+  openPotentialForm(caseId) {
+    const c = DB.caseById(caseId);
+    showModal(`
+      <div class="modal-title">Mark as Potential 🔥</div>
+      <div class="modal-sub">${c.customer_name}</div>
+      <div class="info-banner info" style="margin-bottom: 12px;">Hot lead — worth pursuing aggressively. Add a note kenapa potensi tinggi.</div>
+      <div class="form-group">
+        <label>Why is this potential? (followup notes)</label>
+        <textarea id="pot-note" rows="3" placeholder="e.g. Income tinggi, masuk syarat semua koperasi · follow up next week"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Follow-up Date (optional)</label>
+        <input type="date" id="pot-followup" value="">
+      </div>
+      <button class="submit-btn" onclick="App.savePotential('${caseId}')">Save as Potential</button>
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+    `);
+  },
+  
+  savePotential(caseId) {
+    const note = document.getElementById('pot-note').value.trim();
+    const followup = document.getElementById('pot-followup').value;
+    const today = new Date().toISOString().slice(0,10);
+    const updates = {
+      status: 'potential',
+      date_potential: today,
+      potential_note: note,
+      followup_date: followup || null
+    };
+    DB.updateCase(caseId, updates);
+    hideModal();
+    toast('Status: Potential 🔥');
+    this.render();
+  },
+  
+  // On Hold — temporarily pause with reason
+  openOnHoldForm(caseId) {
+    const c = DB.caseById(caseId);
+    showModal(`
+      <div class="modal-title">Put On Hold ⏸️</div>
+      <div class="modal-sub">${c.customer_name}</div>
+      <div class="info-banner info" style="margin-bottom: 12px;">Pause case sementara — boleh resume bila ready.</div>
+      <div class="form-group">
+        <label>Reason for hold</label>
+        <textarea id="hold-note" rows="3" placeholder="e.g. Customer travel · awaiting payslip lain · pertimbangkan dulu"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Expected Resume Date (optional)</label>
+        <input type="date" id="hold-resume" value="">
+      </div>
+      <button class="submit-btn" onclick="App.saveOnHold('${caseId}')">Save On Hold</button>
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+    `);
+  },
+  
+  saveOnHold(caseId) {
+    const note = document.getElementById('hold-note').value.trim();
+    const resume = document.getElementById('hold-resume').value;
+    const today = new Date().toISOString().slice(0,10);
+    const updates = {
+      status: 'on_hold',
+      date_on_hold: today,
+      hold_reason: note,
+      hold_resume_date: resume || null
+    };
+    DB.updateCase(caseId, updates);
+    hideModal();
+    toast('Status: On Hold ⏸️');
     this.render();
   },
   
@@ -3550,53 +3797,97 @@ const App = {
           <div style="font-size: 48px; margin-bottom: 16px;">🔒</div>
           <div style="font-weight: 800; font-size: 18px; color: var(--ink); margin-bottom: 8px;">Tidak Ada Akses</div>
           <div style="font-size: 13px; color: var(--ink-3); max-width: 320px; margin: 0 auto;">
-            Hanya Boss dan Manager boleh melihat Rankings. Sila hubungi admin if you need access.
+            Hanya Boss dan Manager boleh melihat Rankings.
           </div>
         </div>
       `;
     }
     
     const tab = this.state.tabState.adminRank || 'cs';
-    const csRank = Logic.csRanking();
-    const teamRank = Logic.teamRanking();
     
-    return this.topBar(user, 'Rankings', 'Click any row to see their customers') + `
+    // ====== Build enriched ranking data with all 5 metrics ======
+    // CS Ranking: Payslip / KPI / KFI / Com / Special Com
+    const csUsers = DB.users().filter(u => u.role === 'cs' || u.role === 'solo');  // include solo (they also do CS work)
+    const csRows = csUsers.map(u => {
+      const stats = Logic.csStats(u.id);
+      const csCom = Logic.csCommission(u.id);  // CS commission (payslip + submit)
+      const leaderCom = u.role === 'solo' ? Logic.leaderCommission(u.id) : null;
+      const specialCom = leaderCom ? leaderCom.bonusCom : 0;
+      const totalCom = csCom.total + (leaderCom ? leaderCom.total : 0);
+      return {
+        user: u,
+        payslip: stats.total,
+        kpi: stats.submitted,  // submitted cases (KPI)
+        kfi: stats.disburseAmount,  // disburse amount
+        com: totalCom,  // total commission (cs + leader if solo)
+        specialCom: specialCom  // bonus from YTAA/KOMUJA/etc.
+      };
+    }).sort((a, b) => b.payslip - a.payslip);
+    
+    // Team Ranking: Team's Payslip / KPI / KFI / Com / Special Com
+    const teamLeaders = DB.users().filter(u => u.role === 'leader' || u.role === 'solo');
+    const teamRows = teamLeaders.map(l => {
+      const stats = Logic.leaderStats(l.id);
+      const leaderCom = Logic.leaderCommission(l.id);
+      return {
+        user: l,
+        payslip: stats.totalPayslip || stats.cases.length,  // team payslip
+        kpi: stats.kpi,  // team submitted
+        kfi: stats.kfiAmount,  // team disburse
+        com: leaderCom.total,  // KFI com + submit lump
+        specialCom: leaderCom.bonusCom  // package bonuses
+      };
+    }).sort((a, b) => b.kfi - a.kfi);
+    
+    const formatRow = (r, i, idPrefix) => `
+      <div class="ranking-card ${i === 0 ? 'gold' : ''}" onclick="App.viewStaffCustomers('${r.user.id}')" style="cursor: pointer; padding: 14px 16px;" title="Click to see customers">
+        <div class="rank-num">${i+1}</div>
+        <div style="flex: 1; min-width: 0;">
+          <div class="rank-name">${idPrefix}${r.user.name}${r.user.role === 'solo' ? ' <span class="solo-badge">Solo</span>' : ''}</div>
+          <div class="rank-sub" style="margin-bottom: 6px;">${ROLE_LABELS[r.user.role]} · 👆 tap to verify customers</div>
+          <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; font-size: 10px; padding-top: 6px; border-top: 1px solid var(--border-2);">
+            <div style="text-align: center;">
+              <div style="font-weight: 800; color: var(--primary); font-size: 13px;">${r.payslip}</div>
+              <div style="color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; font-weight: 700;">Payslip</div>
+            </div>
+            <div style="text-align: center;">
+              <div style="font-weight: 800; color: var(--primary); font-size: 13px;">${r.kpi}</div>
+              <div style="color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; font-weight: 700;">KPI</div>
+            </div>
+            <div style="text-align: center;">
+              <div style="font-weight: 800; color: var(--primary); font-size: 13px;">${fmtK(r.kfi)}</div>
+              <div style="color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; font-weight: 700;">KFI (RM)</div>
+            </div>
+            <div style="text-align: center;">
+              <div style="font-weight: 800; color: var(--accent-deep); font-size: 13px;">${fmtK(r.com)}</div>
+              <div style="color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; font-weight: 700;">Com (RM)</div>
+            </div>
+            <div style="text-align: center;">
+              <div style="font-weight: 800; color: ${r.specialCom > 0 ? '#C2620C' : 'var(--ink-3)'}; font-size: 13px;">${r.specialCom > 0 ? fmtK(r.specialCom) : '—'}</div>
+              <div style="color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.05em; font-size: 9px; font-weight: 700;">Special</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    
+    return this.topBar(user, 'Rankings', new Date().toLocaleDateString('en-MY', {month: 'long', year: 'numeric'}) + ' · click row to verify customers') + `
       <div class="tabs">
         <button class="tab ${tab === 'cs' ? 'active' : ''}" onclick="App.setTab('adminRank','cs')">CS Ranking</button>
         <button class="tab ${tab === 'team' ? 'active' : ''}" onclick="App.setTab('adminRank','team')">Team Ranking</button>
       </div>
-      <div style="padding: 10px 20px; font-size: 11px; color: var(--ink-3); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;">Sorted by ${tab === 'cs' ? 'Payslip' : 'KFI Disburse'} · click to see customers</div>
+      <div style="padding: 10px 20px; font-size: 11px; color: var(--ink-3); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em;">${tab === 'cs' ? 'Sorted by Payslip count' : 'Sorted by KFI disburse'}</div>
       
-      ${tab === 'cs' ? csRank.map((r, i) => {
-        const leader = Logic.isLeaderRole(r.user) ? r.user : DB.user(r.user.leader_id);
-        const isSolo = r.user.role === 'solo';
-        return `
-        <div class="ranking-card ${i === 0 ? 'gold' : ''}" onclick="App.viewStaffCustomers('${r.user.id}')" style="cursor: pointer;" title="Click to see customers">
-          <div class="rank-num">${i+1}</div>
-          <div class="rank-info">
-            <div class="rank-name">${r.user.name}${isSolo ? ' <span class="solo-badge">Solo</span>' : ''}</div>
-            <div class="rank-sub">${ROLE_LABELS[r.user.role]} · T.${leader?.name || '—'} · 👆 tap to verify</div>
-          </div>
-          <div class="rank-stats">
-            <div class="pri">${r.total}</div>
-            <div class="pri-label">Payslip</div>
-            <div class="sec">${r.submitted} KPI <span class="dim">· RM ${fmtK(r.disburseAmount)}</span></div>
-          </div>
-        </div>
-        `;
-      }).join('') : teamRank.map((t, i) => `
-        <div class="ranking-card ${i === 0 ? 'gold' : ''}" onclick="App.viewStaffCustomers('${t.user.id}')" style="cursor: pointer;" title="Click to see team customers">
-          <div class="rank-num">${i+1}</div>
-          <div class="rank-info">
-            <div class="rank-name">Team ${t.user.name}${t.user.role === 'solo' ? ' <span class="solo-badge">Solo</span>' : ''}</div>
-            <div class="rank-sub">${[t.user.name, ...t.teamMembers.map(m => m.name)].join(' · ')} · 👆 tap</div>
-          </div>
-          <div class="rank-stats">
-            <div class="big">RM ${fmtK(t.kfiAmount)}</div>
-            <div class="small">KFI · ${t.kpi} KPI</div>
-          </div>
-        </div>
-      `).join('')}
+      <div style="padding: 0 0 20px;">
+        ${tab === 'cs' 
+          ? (csRows.length === 0 ? this.emptyState('No data this month.') : csRows.map((r,i) => formatRow(r, i, '')).join('')) 
+          : (teamRows.length === 0 ? this.emptyState('No teams.') : teamRows.map((r,i) => formatRow(r, i, 'Team ')).join(''))
+        }
+      </div>
+      
+      <div style="padding: 0 20px 20px; font-size: 11px; color: var(--ink-3); line-height: 1.6;">
+        <strong>Legend:</strong> Payslip = collected this month · KPI = submitted to koperasi · KFI = disbursed RM · Com = total commission · Special = bonus from YTAA/KOMUJA/etc.
+      </div>
     `;
   },
   
@@ -4425,6 +4716,7 @@ const App = {
           <div class="case-type-pill ${u.role === 'leader' ? 'active' : ''}" data-val="leader" onclick="App.pickRolePill(this, 'eu')">Team Leader</div>
           <div class="case-type-pill ${u.role === 'solo' ? 'active' : ''}" data-val="solo" onclick="App.pickRolePill(this, 'eu')">Solo Leader</div>
           <div class="case-type-pill ${u.role === 'manager' ? 'active' : ''}" data-val="manager" onclick="App.pickRolePill(this, 'eu')">Manager</div>
+          <div class="case-type-pill ${u.role === 'kerani' ? 'active' : ''}" data-val="kerani" onclick="App.pickRolePill(this, 'eu')">Admin</div>
           <div class="case-type-pill ${u.role === 'admin' ? 'active' : ''}" data-val="admin" onclick="App.pickRolePill(this, 'eu')">Boss</div>
         </div>
       </div>
@@ -4507,6 +4799,7 @@ const App = {
           <div class="case-type-pill" data-val="leader" onclick="App.pickRolePill(this, 'nu')">Team Leader</div>
           <div class="case-type-pill" data-val="solo" onclick="App.pickRolePill(this, 'nu')">Solo Leader</div>
           <div class="case-type-pill" data-val="manager" onclick="App.pickRolePill(this, 'nu')">Manager</div>
+          <div class="case-type-pill" data-val="kerani" onclick="App.pickRolePill(this, 'nu')">Admin</div>
           <div class="case-type-pill" data-val="admin" onclick="App.pickRolePill(this, 'nu')">Boss</div>
         </div>
       </div>
@@ -4911,6 +5204,11 @@ const App = {
         { icon: 'target', label: 'Daily', screen: 'daily-report' },
         { icon: 'chart', label: 'Report', screen: 'cs-report' },
       ];
+    } else if (user.role === 'kerani') {
+      // Admin (Kerani) - customer board ONLY
+      items = [
+        { icon: 'list', label: 'Customers', screen: 'admin-customers' },
+      ];
     } else if (Logic.isLeaderRole(user)) {
       items = [
         { icon: 'home', label: 'Home', screen: 'leader-dashboard' },
@@ -4919,9 +5217,11 @@ const App = {
         { icon: 'chart', label: 'Komisen', screen: 'leader-report' },
       ];
     } else {
+      // Boss / Manager
       items = [
         { icon: 'home', label: 'Home', screen: 'admin-dashboard' },
         { icon: 'list', label: 'Customers', screen: 'admin-customers' },
+        { icon: 'trophy', label: 'Ranking', screen: 'admin-rankings' },
         { icon: 'users', label: 'Staff', screen: 'admin-staff' },
         { icon: 'bank', label: 'Koperasi', screen: 'admin-koperasi' },
       ];
@@ -5543,24 +5843,30 @@ const App = {
         </div>
       </div>
       
-      <div class="section-header"><div class="section-title">⭐ YTAA / KOMUJA Bonus</div></div>
+      <div class="section-header"><div class="section-title">💰 Commission · Team Leader Submit (Lump Bonus per submit count)</div></div>
       <div style="padding: 0 20px;">
         <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
-          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">Extra commission bila YTAA/KOMUJA disburse hit threshold.</div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Team Threshold (RM)</label>
-              <input type="number" id="set-bonus-team" value="${draft.commission.bonus_team}" min="0" step="1000" oninput="App.updateSettingsDraft('commission.bonus_team', parseInt(this.value)||0)">
-            </div>
-            <div class="form-group">
-              <label>Solo Threshold (RM)</label>
-              <input type="number" id="set-bonus-solo" value="${draft.commission.bonus_solo}" min="0" step="1000" oninput="App.updateSettingsDraft('commission.bonus_solo', parseInt(this.value)||0)">
-            </div>
+          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">Team Leader dapat one-time lump-sum bonus bila hit submit count tier this month (rejected cases tidak dikira KPI).</div>
+          ${this.renderTierEditor('leader_submit', draft.commission.leader_submit || [], 'KPI Count', 'Lump RM', 'lump', 10)}
+        </div>
+      </div>
+      
+      <div class="section-header"><div class="section-title">💰 Commission · Solo Submit (Lump Bonus per submit count)</div></div>
+      <div style="padding: 0 20px;">
+        <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
+          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">Solo dapat lump-sum bonus bila hit submit count tier (rejected cases not counted). Default: 7→140, 11→420, 15→910, 19→1120, 25→1610.</div>
+          ${this.renderTierEditor('solo_submit', draft.commission.solo_submit || [], 'KPI Count', 'Lump RM', 'lump', 10)}
+        </div>
+      </div>
+      
+      <div class="section-header"><div class="section-title">⭐ Special Bonus by Package (dynamic)</div></div>
+      <div style="padding: 0 20px;">
+        <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
+          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">
+            Per-package bonus rule. Different packages may have different bonuses (YTAA, KOMUJA, etc.).
+            For each, set the disburse threshold (Team / Solo separately) + bonus rate %.
           </div>
-          <div class="form-group">
-            <label>Bonus Rate (% extra)</label>
-            <input type="number" id="set-bonus-rate" value="${draft.commission.bonus_rate}" min="0" max="10" step="0.1" oninput="App.updateSettingsDraft('commission.bonus_rate', parseFloat(this.value)||0)">
-          </div>
+          ${this.renderBonusPackagesEditor(draft.commission.bonus_packages || [])}
         </div>
       </div>
       
@@ -5656,22 +5962,6 @@ const App = {
         </div>
       </div>
       
-      <div class="section-header"><div class="section-title">💵 Loan Amount Options</div></div>
-      <div style="padding: 0 20px;">
-        <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
-          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">Loan amount dropdown options in stage 3 form.</div>
-          ${this.renderListEditor('loan_amounts', draft.loan_amounts, 'amount', true)}
-        </div>
-      </div>
-      
-      <div class="section-header"><div class="section-title">📅 Tenor Options</div></div>
-      <div style="padding: 0 20px;">
-        <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
-          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 10px;">Tenor dropdown options (months + display label).</div>
-          ${this.renderTenorEditor(draft.tenors)}
-        </div>
-      </div>
-      
       <div class="section-header"><div class="section-title">🎨 Branding</div></div>
       <div style="padding: 0 20px;">
         <div style="background: var(--cream-2); border-radius: 14px; padding: 14px; border: 1px solid var(--border-2);">
@@ -5729,17 +6019,97 @@ const App = {
   updateTier(key, idx, field, value) {
     this.state.settingsDirty = true;
     const d = this.state.settingsDraft;
+    if (!d.commission[key]) d.commission[key] = [];
     if (!d.commission[key][idx]) return;
     d.commission[key][idx][field] = value;
   },
   addTier(key, rateField) {
     const d = this.state.settingsDraft;
+    this.state.settingsDirty = true;
+    if (!d.commission[key]) d.commission[key] = [];
     d.commission[key].push({ min: 0, [rateField]: 0 });
     this.render();
   },
   removeTier(key, idx) {
     const d = this.state.settingsDraft;
+    this.state.settingsDirty = true;
+    if (!d.commission[key]) return;
     d.commission[key].splice(idx, 1);
+    this.render();
+  },
+  
+  // ============ Bonus Packages Editor (item 9) ============
+  renderBonusPackagesEditor(bonusPackages) {
+    const pkgOptions = LOAN_PACKAGES.map(p => 
+      `<option value="${p.id}">${p.name}</option>`
+    ).join('');
+    
+    return `
+      <div id="bonus-packages-editor">
+        ${bonusPackages.map((bp, i) => {
+          const pkg = LOAN_PACKAGES.find(p => p.id === bp.package_id);
+          return `
+          <div style="background: var(--cream); border: 1px solid var(--border-2); border-radius: 12px; padding: 12px; margin-bottom: 8px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <strong style="font-size: 13px; color: var(--primary);">${pkg ? pkg.name : '(no package selected)'}</strong>
+              <button onclick="App.removeBonusPackage(${i})" style="background: transparent; color: var(--danger); border: 1px solid rgba(184, 66, 58, 0.3); padding: 4px 10px; border-radius: 8px; font-family: inherit; font-weight: 700; font-size: 10px; cursor: pointer;">Remove</button>
+            </div>
+            <div class="form-group" style="margin-bottom: 8px;">
+              <label style="font-size: 10px;">Package</label>
+              <select onchange="App.updateBonusPackage(${i}, 'package_id', this.value)">
+                <option value="">— Pilih package —</option>
+                ${LOAN_PACKAGES.map(p => `<option value="${p.id}" ${bp.package_id === p.id ? 'selected' : ''}>${p.name} (${p.rate}% / ${p.payout}%)</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-row" style="margin-bottom: 0;">
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 10px;">Team Threshold (RM)</label>
+                <input type="number" value="${bp.threshold_team || 0}" min="0" step="1000" oninput="App.updateBonusPackage(${i}, 'threshold_team', parseInt(this.value)||0)">
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 10px;">Solo Threshold (RM)</label>
+                <input type="number" value="${bp.threshold_solo || 0}" min="0" step="1000" oninput="App.updateBonusPackage(${i}, 'threshold_solo', parseInt(this.value)||0)">
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 10px;">Bonus Rate %</label>
+                <input type="number" value="${bp.rate_pct || 0}" min="0" max="10" step="0.1" oninput="App.updateBonusPackage(${i}, 'rate_pct', parseFloat(this.value)||0)">
+              </div>
+            </div>
+          </div>
+        `}).join('')}
+        <button onclick="App.addBonusPackage()" style="background: var(--cream); color: var(--primary); border: 1px dashed var(--primary); padding: 10px; border-radius: 10px; font-family: inherit; font-weight: 700; font-size: 12px; cursor: pointer; width: 100%; margin-top: 4px;">+ Add Bonus Package</button>
+        ${bonusPackages.length === 0 ? '<div style="font-size: 11px; color: var(--ink-3); text-align: center; padding: 10px;">Tiada bonus packages. Add satu untuk YTAA/KOMUJA/etc.</div>' : ''}
+      </div>
+    `;
+  },
+  
+  updateBonusPackage(idx, field, value) {
+    this.state.settingsDirty = true;
+    const d = this.state.settingsDraft;
+    if (!d.commission.bonus_packages) d.commission.bonus_packages = [];
+    if (!d.commission.bonus_packages[idx]) return;
+    d.commission.bonus_packages[idx][field] = value;
+    // Re-render if package_id changed (so name updates)
+    if (field === 'package_id') this.render();
+  },
+  addBonusPackage() {
+    this.state.settingsDirty = true;
+    const d = this.state.settingsDraft;
+    if (!d.commission.bonus_packages) d.commission.bonus_packages = [];
+    d.commission.bonus_packages.push({ 
+      package_id: '', 
+      threshold_team: 70000, 
+      threshold_solo: 35000, 
+      rate_pct: 1.0 
+    });
+    this.render();
+  },
+  removeBonusPackage(idx) {
+    if (!confirm('Remove this bonus package rule?')) return;
+    this.state.settingsDirty = true;
+    const d = this.state.settingsDraft;
+    if (!d.commission.bonus_packages) return;
+    d.commission.bonus_packages.splice(idx, 1);
     this.render();
   },
   
@@ -5972,16 +6342,18 @@ async function bootstrap() {
         console.log("✓ Initial data uploaded to cloud");
       }
       
-      // Subscribe to real-time updates
+      // Subscribe to real-time updates - all subscribers now trigger UI refresh
       window.Cloud.subscribe('cases', items => {
         DB.set(DB.K.cases, items);
         if (App.state.currentScreen !== 'login') App.render();
       });
       window.Cloud.subscribe('users', items => {
         DB.set(DB.K.users, items);
+        if (App.state.currentScreen !== 'login') App.render();
       });
       window.Cloud.subscribe('activities', items => {
         DB.set(DB.K.activities, items);
+        if (App.state.currentScreen !== 'login') App.render();
       });
       window.Cloud.subscribe('customer_notes', items => {
         const obj = {};
@@ -5991,19 +6363,24 @@ async function bootstrap() {
       window.Cloud.subscribe('koperasi', items => {
         DB.set(DB.K.koperasi, items);
         refreshPackages();
+        if (App.state.currentScreen !== 'login') App.render();
       });
       window.Cloud.subscribe('announcements', items => {
         DB.set(DB.K.announcements, items);
         if (App.state.currentScreen !== 'login') App.render();
       });
-      // Settings is a single doc 'main' - listen via getDoc-style polling not needed
-      // (settings rarely change; manual reload picks up changes)
+      // Settings is a single doc 'main' - listen to update all clients
       window.Cloud.subscribe('settings', items => {
         const main = items.find(s => s.id === 'main');
         if (main) {
-          DB.set(DB.K.settings, main);
-          refreshSettings();
-          if (App.state.currentScreen !== 'login') App.render();
+          // Don't overwrite local draft if user is editing
+          if (!App.state.settingsDirty) {
+            DB.set(DB.K.settings, main);
+            refreshSettings();
+            if (App.state.currentScreen !== 'login') App.render();
+          } else {
+            console.log('Settings cloud update received but user has unsaved local draft - ignored');
+          }
         }
       });
       
