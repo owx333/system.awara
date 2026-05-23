@@ -2550,12 +2550,12 @@ const App = {
     
     // Get base cases (mine or team)
     let cases;
-if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
-  // Use ALL cases from team, not just monthly
-  cases = DB.cases().filter(c => c.leader_id === user.id);
-} else if (isLeader) {
-  cases = DB.cases().filter(c => c.source_cs_id === user.id);
-} else {
+    if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
+      // Use ALL cases from team, not just monthly
+      cases = DB.cases().filter(c => c.leader_id === user.id || c.source_cs_id === user.id);
+    } else if (isLeader) {
+      cases = DB.cases().filter(c => c.source_cs_id === user.id || c.leader_id === user.id);
+    } else {
       cases = DB.cases().filter(c => c.source_cs_id === user.id);
     }
     
@@ -2744,7 +2744,7 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
           ${c.disburse_amount ? `<div style="margin-top: 10px; padding: 10px 12px; background: var(--success); color: white; border-radius: 8px; font-size: 12px; font-weight: 700; display: flex; justify-content: space-between; align-items: center;"><span>Disbursed: ${fmtRM(c.disburse_amount)}</span><span style="font-size: 10px; opacity: 0.8;">${c.date_disbursed ? new Date(c.date_disbursed).toLocaleDateString('en-MY') : ''}</span></div>` : ''}
           ${c.status === 'pending' && c.pending_reason ? `<div style="margin-top: 10px; padding: 10px 12px; background: #F0E4FF; color: #6B3FB8; border-radius: 8px; font-size: 12px; font-weight: 600;"><strong>Pending:</strong> ${c.pending_reason}</div>` : ''}
           ${c.status === 'rejected' && c.rejection_reason ? `<div style="margin-top: 10px; padding: 10px 12px; background: var(--danger-bg); color: var(--danger); border-radius: 8px; font-size: 12px; font-weight: 600;"><strong>Rejected:</strong> ${c.rejection_reason}${c.date_rejected ? ' · ' + new Date(c.date_rejected).toLocaleDateString('en-MY') : ''}</div>` : ''}
-          ${isAdmin && (c.amm_password || c.hrmis_password) ? `
+          ${isAdminLike && (c.amm_password || c.hrmis_password) ? `
             <div style="margin-top: 10px; padding: 10px 12px; background: var(--cream-2); border-radius: 8px; font-size: 11px; color: var(--ink-2); border: 1px dashed var(--border);">
               <div style="font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); margin-bottom: 4px;">Submit Credentials (Admin View)</div>
               ${c.amm_password ? `<div>AMM: <strong>${c.amm_password}</strong></div>` : ''}
@@ -2821,11 +2821,9 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
           ` : `<div style="margin-top: 6px; font-size: 11px; color: #9ca3af; font-style: italic;">Tiada remark admin.</div>`}
         </div>
       ` : ''}
-      
       <button class="btn-secondary" onclick="hideModal()">Close</button>
     `);
   },
-
   openAdminDetail(caseId) {
     const c = DB.caseById(caseId);
     if (!c) return;
@@ -2874,7 +2872,6 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
     toast('Admin detail disimpan ✓');
     this.viewCase(caseId);
   },
-  
   // Boss-only: delete a case permanently from local + Firestore
   deleteCase(caseId) {
     const c = DB.caseById(caseId);
@@ -5860,6 +5857,10 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
           <div class="qa-title">💰 Report C · Disbursement List</div>
           <div class="qa-sub">Customer, IC, Package, Disburse Amount, Date</div>
         </div>
+        <div class="qa-card" onclick="App.exportReport('admin-full')" style="border-left: 4px solid #2563a8;">
+          <div class="qa-title">📋 Report D · Full Admin Report</div>
+          <div class="qa-sub">Semua data ikut format HQ · admin/manager/kerani</div>
+        </div>
       </div>
     `;
   },
@@ -5974,7 +5975,52 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
       rows.push([]);
       rows.push(['', '', '', '', 'TOTAL:', '', '', totalDisburse.toFixed(0)]);
     }
-    
+    if (type === 'admin-full') {
+      filename = `AWARA_Admin_Full_${ym}.csv`;
+      let cases = DB.cases();
+      if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
+      if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
+      cases = cases.filter(c => {
+        const d = c.date_submitted || c.date_payslip || '';
+        return d.startsWith(ym);
+      });
+      cases.sort((a,b) => (a.date_submitted||'').localeCompare(b.date_submitted||''));
+
+      rows.push(['FULL ADMIN REPORT', ym]);
+      rows.push(['Generated:', new Date().toLocaleString('en-MY')]);
+      rows.push([]);
+      rows.push(['NO', 'DATE EMAIL', 'STAFF', 'NAMA CUSTOMER', 'NO IC', 'NO H/P', 'PACKAGE', 'TENURE', 'LOAN AMOUNT', 'PAYOUT (RM)', 'ANM', 'HRMIS', 'APPROVED AMOUNT', 'APPROVED DATE', 'DISBURSE DATE', 'MAJIKAN', 'DATE POSTAGE', 'POSTAGE NUMBER', 'DATE RECEIVE', 'STATUS / REMARK', 'REMARK ADMIN']);
+
+      let no = 1;
+      cases.forEach(c => {
+        const cs = DB.user(c.source_cs_id);
+        const p = LOAN_PACKAGES.find(x => x.id === c.package_id);
+        const remarks = (c.remarks || []).map(r => r.text).join(' | ');
+        rows.push([
+          no++,
+          c.date_email || '',
+          cs?.name || c.source_cs_id || '',
+          c.customer_name || '',
+          c.ic || '',
+          c.phone || '',
+          p?.name || '',
+          c.tenor || '',
+          (c.loan_amount || 0).toFixed(2),
+          (c.disburse_amount || c.approved_amount || c.loan_amount || 0).toFixed(2),
+          c.amm_password || '',
+          c.hrmis_password || '',
+          (c.approved_amount || 0).toFixed(2),
+          c.date_approved || '',
+          c.date_disbursed || '',
+          c.majikan || '',
+          c.date_postage || '',
+          c.postage_number || '',
+          c.date_receive || '',
+          STATUS_LABELS[c.status] + (remarks ? ' · ' + remarks : ''),
+          c.remark_admin || ''
+        ]);
+      });
+    }
     if (rows.length <= 4) { toast('No data for this filter'); return; }
     
     const csv = rows.map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g,'""')}"`).join(',')).join('\n');
