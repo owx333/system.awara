@@ -1405,9 +1405,9 @@ const DB = {
     this.set(this.K.cases, cases);
     if (window.Cloud?.connected) window.Cloud.setDoc('cases', id, cases[idx]);
     
-    // Notify CS and Leader if editor is admin/manager/hq and there are real changes
+    // Notification logic based on who edits
     const editorRole = user?.role;
-    if (['admin', 'manager', 'hq'].includes(editorRole) && Object.keys(changes).length > 0) {
+    if (Object.keys(changes).length > 0) {
       const updatedCase = cases[idx];
       const changedFields = Object.keys(changes);
       const isStatusChange = changedFields.includes('status');
@@ -1415,23 +1415,36 @@ const DB = {
         ? `Status dikemaskini: ${STATUS_LABELS[changes.status?.to] || changes.status?.to}`
         : `Maklumat pelanggan dikemaskini`;
       const notifBody = `${updatedCase.customer_name} · dikemaskini oleh ${user?.name || 'Admin'}${isStatusChange ? ` → ${STATUS_LABELS[changes.status?.to] || changes.status?.to}` : ` (${changedFields.filter(f => f !== 'status').slice(0,3).join(', ')})`}`;
-      
-      // Notify CS
-      if (updatedCase.source_cs_id && updatedCase.source_cs_id !== user?.id) {
-        this.addNotification(updatedCase.source_cs_id, { title: notifTitle, body: notifBody, caseId: id });
-      }
-      // Notify Leader
-      // Notify all admin/boss in same branch
-      const sameBranchAdmins = this.users().filter(u => 
-        ['admin', 'manager'].includes(u.role) && 
-        u.branch_id === updatedCase.branch_id && 
-        u.id !== user?.id
-      );
-      sameBranchAdmins.forEach(admin => {
-        this.addNotification(admin.id, { title: notifTitle, body: notifBody, caseId: id });
-      });
-      if (updatedCase.leader_id && updatedCase.leader_id !== user?.id) {
-        this.addNotification(updatedCase.leader_id, { title: notifTitle, body: notifBody, caseId: id });
+
+      const notify = (userId) => {
+        if (userId && userId !== user?.id) {
+          this.addNotification(userId, { title: notifTitle, body: notifBody, caseId: id });
+        }
+      };
+
+      const allUsers = this.users();
+      const caseBranch = updatedCase.branch_id;
+
+      if (editorRole === 'hq') {
+        // HQ edit → CS, Leader, branch admin/manager/kerani, boss
+        notify(updatedCase.source_cs_id);
+        notify(updatedCase.leader_id);
+        allUsers.filter(u => ['admin', 'manager', 'kerani', 'boss'].includes(u.role) && u.branch_id === caseBranch)
+          .forEach(u => notify(u.id));
+        allUsers.filter(u => u.role === 'boss').forEach(u => notify(u.id));
+      } else if (['admin', 'manager', 'kerani'].includes(editorRole)) {
+        // Branch admin/manager/kerani edit → CS, Leader, HQ, boss, other admin/manager same branch
+        notify(updatedCase.source_cs_id);
+        notify(updatedCase.leader_id);
+        allUsers.filter(u => u.role === 'hq').forEach(u => notify(u.id));
+        allUsers.filter(u => u.role === 'boss').forEach(u => notify(u.id));
+        allUsers.filter(u => ['admin', 'manager'].includes(u.role) && u.branch_id === caseBranch)
+          .forEach(u => notify(u.id));
+      } else if (['leader', 'solo'].includes(editorRole)) {
+        // Leader edit → CS, branch admin/manager, boss
+        notify(updatedCase.source_cs_id);
+        allUsers.filter(u => ['admin', 'manager'].includes(u.role) && u.branch_id === caseBranch)
+          .forEach(u => notify(u.id));
       }
     }
     
