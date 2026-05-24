@@ -6252,14 +6252,24 @@ ${isAdminLike ? `
     const ym = this.state.exportMonth || new Date().toISOString().slice(0,7);
     const staff = this.state.exportStaff || 'all';
     const pkg = this.state.exportPkg || 'all';
+    const exportFrom = this.state.exportFrom || null;
+    const exportTo = this.state.exportTo || null;
     const exportBranch = this.state.exportBranch || 'all';
     const user = Auth.current();
     const branchFilter = !Permissions.canViewAllBranches(user) && user.role !== 'admin' 
       ? user.branch_id 
       : (exportBranch !== 'all' ? exportBranch : null);
     
-    let rows = [];
-    let filename = `awara_${type}_${ym}${branchFilter ? '_' + branchFilter : ''}.csv`;
+let rows = [];
+    const dateLabel = exportFrom && exportTo ? `${exportFrom}_to_${exportTo}` : exportFrom ? `from_${exportFrom}` : exportTo ? `to_${exportTo}` : ym;
+    let filename = `awara_${type}_${dateLabel}${branchFilter ? '_' + branchFilter : ''}.csv`;
+
+    const filterByDate = (cases, dateField) => {
+      if (exportFrom && exportTo) return cases.filter(c => c[dateField] && c[dateField] >= exportFrom && c[dateField] <= exportTo);
+      if (exportFrom) return cases.filter(c => c[dateField] && c[dateField] >= exportFrom);
+      if (exportTo) return cases.filter(c => c[dateField] && c[dateField] <= exportTo);
+      return cases.filter(c => c[dateField] && c[dateField].startsWith(ym));
+    };
     
     if (type === 'performance') {
       rows.push(['MONTHLY PERFORMANCE REPORT', ym]);
@@ -6305,7 +6315,7 @@ if (type === 'submitted') {
       rows.push(['Generated:', new Date().toLocaleString('en-MY')]);
       rows.push([]);
 
-      let cases = DB.cases().filter(c => c.date_submitted && c.date_submitted.startsWith(ym));
+      let cases = filterByDate(DB.cases(), 'date_submitted');
       if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
       if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
       if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
@@ -6341,7 +6351,7 @@ if (type === 'disbursed') {
       rows.push(['Generated:', new Date().toLocaleString('en-MY')]);
       rows.push([]);
 
-      let cases = DB.cases().filter(c => c.date_disbursed && c.date_disbursed.startsWith(ym) && c.status === 'disbursed');
+      let cases = filterByDate(DB.cases(), 'date_disbursed').filter(c => c.status === 'disbursed');
       if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
       if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
       if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
