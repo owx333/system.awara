@@ -2810,7 +2810,8 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
     const isMyTeamCase = user.id === c.leader_id || c.source_cs_id === user.id;
     const isMyCs = Logic.isLeaderRole(user) && (user.id === c.leader_id || user.id === c.source_cs_id || DB.user(c.source_cs_id)?.leader_id === user.id);
     
-    const canEdit = isAdminLike || isMyTeamCase || isMyCs;
+    const isCSOnly = user.role === 'cs';
+    const canEdit = !isCSOnly && (isAdminLike || isMyTeamCase || isMyCs);
     const canProcessStage2 = canEdit && (Logic.isLeaderRole(user) || isAdminLike);
     const isAdmin = user.role === 'admin';
     const canEditCustomerInfo = Permissions.canEditCustomerInfo(user);  // Leader/Solo/Manager/Boss
@@ -4547,7 +4548,10 @@ ${isAdminLike ? `
     
     // Auto-increment today's payslip count
     const todayActivity = DB.todayActivity(user.id);
-    DB.updateActivity(user.id, { payslip: todayActivity.payslip + 1 });
+    const savedCase = DB.cases()[0]; // most recent = just added
+    if (!savedCase?.is_duplicate) {
+      DB.updateActivity(user.id, { payslip: todayActivity.payslip + 1 });
+    }
     
     toast('Payslip saved · Awaiting Leader to process');
     this.goto(this.defaultScreen(user));
