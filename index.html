@@ -5375,8 +5375,8 @@ ${isAdminLike ? `
           <div class="case-type-pill" data-val="solo" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Solo Leader</div>
           <div class="case-type-pill" data-val="manager" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Manager</div>
           <div class="case-type-pill" data-val="kerani" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Admin</div>
-          ${Auth.current()?.role !== 'hq' ? '<div class="case-type-pill" data-val="admin" onclick="App.pickRolePill(this, \'nu\'); document.getElementById(\'nu-branch-group\').style.display=\'none\';">Boss</div>' : ''}
-          <div class="case-type-pill" data-val="hq" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='none';">HQ</div>
+          ${!['hq','manager'].includes(Auth.current()?.role) ? '<div class="case-type-pill" data-val="admin" onclick="App.pickRolePill(this, \'nu\'); document.getElementById(\'nu-branch-group\').style.display=\'none\';">Boss</div>' : ''}
+          ${Auth.current()?.role !== 'manager' ? '<div class="case-type-pill" data-val="hq" onclick="App.pickRolePill(this, \'nu\'); document.getElementById(\'nu-branch-group\').style.display=\'none\';">HQ</div>' : ''}
         </div>
       </div>
       
