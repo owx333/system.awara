@@ -5242,7 +5242,7 @@ ${isAdminLike ? `
         <input type="text" id="eu-name" value="${u.name}">
       </div>
 
-      <div class="form-group" id="eu-branch-group" ${u.role === 'hq' ? 'style="display:none;"' : ''}>
+      <div class="form-group" id="eu-branch-group" ${(u.role === 'hq' || u.role === 'admin') ? 'style="display:none;"' : ''}>
         <label>Branch</label>
         <select id="eu-branch">
           ${branches.map(b => `<option value="${b.id}" ${u.branch_id === b.id ? 'selected' : ''}>${b.name}</option>`).join('')}
@@ -5257,7 +5257,7 @@ ${isAdminLike ? `
           <div class="case-type-pill ${u.role === 'solo' ? 'active' : ''}" data-val="solo" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='';">Solo Leader</div>
           <div class="case-type-pill ${u.role === 'manager' ? 'active' : ''}" data-val="manager" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='';">Manager</div>
           <div class="case-type-pill ${u.role === 'kerani' ? 'active' : ''}" data-val="kerani" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='';">Admin</div>
-          <div class="case-type-pill ${u.role === 'admin' ? 'active' : ''}" data-val="admin" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='';">Boss</div>
+          <div class="case-type-pill ${u.role === 'admin' ? 'active' : ''}" data-val="admin" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='none';">Boss</div>
           <div class="case-type-pill ${u.role === 'hq' ? 'active' : ''}" data-val="hq" onclick="App.pickRolePill(this, 'eu'); document.getElementById('eu-branch-group').style.display='none';">HQ</div>
         </div>
       </div>
@@ -5297,7 +5297,7 @@ ${isAdminLike ? `
     const role = document.querySelector('#eu-role .case-type-pill.active').dataset.val;
     const leaderId = document.getElementById('eu-leader').value;
     const pass = document.getElementById('eu-pass').value;
-    let branchId = role === 'hq' ? 'hq' : document.getElementById('eu-branch')?.value;
+    let branchId = (role === 'hq' || role === 'admin') ? 'hq' : document.getElementById('eu-branch')?.value;
     
     if (!name) { toast('Name required'); return; }
     if (role === 'cs' && !leaderId) { toast('Pilih Team Leader untuk CS'); return; }
@@ -5376,7 +5376,7 @@ ${isAdminLike ? `
           <div class="case-type-pill" data-val="solo" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Solo Leader</div>
           <div class="case-type-pill" data-val="manager" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Manager</div>
           <div class="case-type-pill" data-val="kerani" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Admin</div>
-          <div class="case-type-pill" data-val="admin" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='';">Boss</div>
+          <div class="case-type-pill" data-val="admin" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='none';">Boss</div>
           <div class="case-type-pill" data-val="hq" onclick="App.pickRolePill(this, 'nu'); document.getElementById('nu-branch-group').style.display='none';">HQ</div>
         </div>
       </div>
@@ -5434,7 +5434,7 @@ ${isAdminLike ? `
       let branchId = branchEl?.value || '';
       
       // HQ role doesn't need a branch selection - auto-assign to 'hq'
-      if (role === 'hq') branchId = 'hq';
+      if (role === 'hq' || role === 'admin') branchId = 'hq';
       
       if (!name) { toast('Name diperlukan'); nameEl.focus(); return; }
       if (!branchId) { toast('Pilih Branch untuk staff ini'); branchEl?.focus(); return; }
