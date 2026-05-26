@@ -1603,7 +1603,7 @@ const DB = {
         notify(caseOwner);
         allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
       } else if (editorRole === 'solo') {
-        allUsers.filter(u => u.role === 'admin').forEach(u => notify(u.id));
+        allUsers.filter(u => u.role === 'kerani' && u.branch_id === caseBranch).forEach(u => notify(u.id));
         allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
       } else if (editorRole === 'leader') {
         allUsers.filter(u => u.role === 'admin').forEach(u => notify(u.id));
