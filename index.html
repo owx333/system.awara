@@ -5677,9 +5677,10 @@ if (!Permissions.canViewAllBranches(user)) {
   },
   
   // ============ EDIT CUSTOMER INFO (Admin / Leader for own team) ============
-  openEditCustomer(caseId) {
-    const c = DB.caseById(caseId);
-    if (!c) return;
+openEditCustomer(caseId) {
+  if (!Permissions.canEditCustomerInfo(Auth.current())) { toast('No permission'); return; }
+  const c = DB.caseById(caseId);
+  if (!c) return;
     const cs = DB.user(c.source_cs_id);
     const allCS = DB.users().filter(u => u.role !== 'admin');
     const allLeaders = DB.users().filter(u => u.role === 'leader' || u.role === 'solo');
