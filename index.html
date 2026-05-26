@@ -5230,8 +5230,8 @@ ${isAdminLike ? `
     
     // Branch filter: HQ sees all branches, everyone else only sees their own branch
     // Note: cases without branch_id are treated as belonging to the first non-HQ branch
-    if (!Permissions.canViewAllBranches(user)) {
-      cases = cases.filter(c => c.branch_id === user.branch_id || (!c.branch_id && user.branch_id === DB.branches().find(b => b.id !== 'hq')?.id));
+if (!Permissions.canViewAllBranches(user)) {
+  cases = cases.filter(c => c.branch_id === user.branch_id);
     } else if (filterBranch !== 'all') {
       // HQ: apply optional branch filter pill
       cases = cases.filter(c => c.branch_id === filterBranch);
