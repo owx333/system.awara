@@ -1058,7 +1058,7 @@ function generateSeedCases() {
     'MOHD SUHAIDI BIN MOHD ARIFFIN', 'NORZILAWATI BINTI MOHD', 'NOOR EZDIANI BINTI ZAINAL ABIDIN',
     'NOORSIDA BINTI HUD', 'RAHIMIE BINTI AUGUSTINE', 'AHMAD FAIZ BIN OSMAN',
     'SITI NORHALIZA BINTI ALI', 'WAN AZMI BIN WAN HARUN', 'NUR HANIS BINTI KAMARUDIN',
-    'ROZAIDI BIN ABDULLAH', 'FARIZAN BINTI RAHMAN', 'MUHAMMAD HAFIZ BIN ZAINAL',
+    'ROZAIDI BIN ABDULLAH', 'FARIZAN BINTI RAHMAN', 'MUHAD HAFIZ BIN ZAINAL',
     'NUR AISYAH BINTI YUSOF', 'ABDUL RAHMAN BIN ISMAIL', 'NURUL HUDA BINTI SAID',
     'AMIRUL FIKRI BIN MOHD', 'SARIPAH BINTI HASSAN', 'AZLAN BIN MUSA',
     'KHAIRUL ANUAR BIN OMAR', 'NORLIZA BINTI RAZAK', 'MOHD AZRI BIN ZAKARIA',
@@ -1089,8 +1089,8 @@ function generateSeedCases() {
     { cs: 'hani', leader: 'hani', count: 17, contacted: 9, proposed: 4, submitted: 2, approved: 1, disbursed: 1, pending: 1 },
   ];
   
-  // Sample AMM/HRMIS password(text labels for tracking which login was used)
-  const ammCreds = ['AMM-FAIZAH-01', 'AMM-AYNA-02', 'AMM-IZAH-03', 'AMM-ELLY-04', 'AMM-ATIRAH-S', 'AMM-HANI-S'];
+  // Sample ANM/HRMIS password(text labels for tracking which login was used)
+  const anmCreds = ['ANM-FAIZAH-01', 'ANM-AYNA-02', 'ANM-IZAH-03', 'ANM-ELLY-04', 'ANM-ATIRAH-S', 'ANM-HANI-S'];
   const hrmisCreds = ['HRMIS-MAIN', 'HRMIS-SUB-A', 'HRMIS-SUB-B', 'HRMIS-SUB-C'];
   
   const pendingReasonsList = [
@@ -1130,7 +1130,7 @@ function generateSeedCases() {
       let pkg = null, amt = null, tenor = null, bulanan = null, caseType = null;
       let approvedAmt = null, disburseAmt = null;
       let dateContacted = null, dateSubmitted = null, dateApproved = null, dateDisbursed = null, dateRejected = null;
-      let ammPw = null, hrmisPw = null;
+      let anmPw = null, hrmisPw = null;
       let pendingReason = null;
       let rejectionReason = null;
       
@@ -1148,7 +1148,7 @@ function generateSeedCases() {
           // Cross-month: 20% chance the case was submitted last month
           const submitMonth = Math.random() > 0.8 ? -1 : 0;
           dateSubmitted = new Date(year, month + submitMonth, Math.min(dayInMonth + 2, 28)).toISOString().slice(0,10);
-          ammPw = ammCreds[Math.floor(Math.random() * ammCreds.length)];
+          anmPw = anmCreds[Math.floor(Math.random() * anmCreds.length)];
           hrmisPw = hrmisCreds[Math.floor(Math.random() * hrmisCreds.length)];
         }
         if (['approved','disbursed'].includes(status)) {
@@ -1196,7 +1196,7 @@ function generateSeedCases() {
         date_disbursed: dateDisbursed,
         date_rejected: dateRejected,
         // Submit passwords
-        amm_password: ammPw,
+        anm_password: anmPw,
         hrmis_password: hrmisPw,
         // Status
         status,
@@ -3182,7 +3182,7 @@ ${isAdminLike ? `
                 <div style="font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3);">Submit passwords</div>
                 <button onclick="App.openEditpasswords('${c.id}')" style="background: var(--primary); color: var(--accent); border: none; border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: 700; cursor: pointer; font-family: inherit;">✏️ Edit</button>
               </div>
-              <div>ANM: <strong>${c.amm_password || '—'}</strong></div>
+              <div>ANM: <strong>${c.anm_password || '—'}</strong></div>
               <div>HRMIS: <strong>${c.hrmis_password || '—'}</strong></div>
             </div>
           ` : ''}
@@ -3310,7 +3310,7 @@ ${isAdminLike ? `
       <div class="modal-sub">${c.customer_name} · ${c.ic || '—'}</div>
       <div class="form-group">
         <label>ANM</label>
-        <input type="text" id="ec-amm" placeholder="ANM password..." value="${c.amm_password || ''}">
+        <input type="text" id="ec-anm" placeholder="ANM password..." value="${c.anm_password || ''}">
       </div>
       <div class="form-group">
         <label>HRMIS</label>
@@ -3323,7 +3323,7 @@ ${isAdminLike ? `
 
   saveEditpasswords(caseId) {
     const updates = {
-      amm_password:   document.getElementById('ec-amm').value.trim() || null,
+      anm_password:   document.getElementById('ec-anm').value.trim() || null,
       hrmis_password: document.getElementById('ec-hrmis').value.trim() || null,
     };
     DB.updateCase(caseId, updates);
@@ -3779,7 +3779,7 @@ ${isAdminLike ? `
     this.render();
   },
   
-  // Submit form: requires AMM/HRMIS passwords
+  // Submit form: requires ANM/HRMIS passwords
   openSubmitForm(caseId) {
     const c = DB.caseById(caseId);
     const today = new Date().toISOString().slice(0,10);
@@ -3788,12 +3788,12 @@ ${isAdminLike ? `
       <div class="modal-sub">${c.customer_name} · ${pkgName(c.package_id)} · ${fmtRM(c.loan_amount)}</div>
       
       <div class="info-banner" style="margin: 0 0 14px;">
-        <strong>Rekod AMM & HRMIS passwords</strong> yang digunakan untuk submit case ini. Untuk audit trail.
+        <strong>Rekod ANM & HRMIS passwords</strong> yang digunakan untuk submit case ini. Untuk audit trail.
       </div>
       
       <div class="form-group">
-        <label>AMM Password / Account *</label>
-        <input type="text" id="sb-amm" placeholder="AMM password" value="${c.amm_password || ''}">
+        <label>ANM Password / Account *</label>
+        <input type="text" id="sb-anm" placeholder="ANM password" value="${c.anm_password || ''}">
       </div>
       
       <div class="form-group">
@@ -3812,14 +3812,14 @@ ${isAdminLike ? `
   },
   
   confirmSubmit(caseId) {
-    const amm = document.getElementById('sb-amm').value.trim();
+    const anm = document.getElementById('sb-anm').value.trim();
     const hrmis = document.getElementById('sb-hrmis').value.trim();
     const date = document.getElementById('sb-date').value;
-    if (!amm || !hrmis) { toast('AMM & HRMIS required'); return; }
+    if (!anm || !hrmis) { toast('ANM & HRMIS required'); return; }
     DB.updateCase(caseId, {
       status: 'submitted',
       date_submitted: date,
-      amm_password: amm,
+      anm_password: anm,
       hrmis_password: hrmis
     });
     hideModal();
@@ -6952,7 +6952,7 @@ if (type === 'disbursed') {
           c.tenor || '',
           (c.loan_amount || 0).toFixed(2),
           (c.payout || c.disburse_amount || c.approved_amount || c.loan_amount || 0).toFixed(2),
-          c.amm_password || '',
+          c.anm_password || '',
           c.hrmis_password || '',
           (c.approved_amount || 0).toFixed(2),
           c.date_approved || '',
