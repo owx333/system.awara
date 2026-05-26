@@ -80,6 +80,140 @@ window.__firebaseStatus = { stage: 'loading', error: null };
       }
     });
     
+    // ========== OUTBOX QUEUE (resilient writes) ==========
+    // If Firestore write fails (quota exceeded, network down, etc),
+    // queue the operation in localStorage and auto-retry every 60 seconds
+    // and when network reconnects. Ensures NO data loss.
+    
+    const OUTBOX_KEY = 'awara_outbox_queue';
+    const MAX_OUTBOX_SIZE = 1000;     // safety cap
+    const MAX_RETRIES = 200;          // 200 retries × 60s = ~3 hours
+    
+    // Errors that ARE retriable (queue + retry later)
+    const RETRIABLE_ERROR_CODES = [
+      'resource-exhausted',     // quota exceeded
+      'unavailable',            // server unreachable
+      'deadline-exceeded',      // timeout
+      'internal',               // server error
+      'aborted',                // transaction conflict
+      'cancelled',              // RPC cancelled
+      'unknown'                 // unknown error
+    ];
+    
+    function isRetriableError(error) {
+      if (!error) return false;
+      const code = error.code || '';
+      // Check Firebase error code
+      if (RETRIABLE_ERROR_CODES.some(c => code.includes(c))) return true;
+      // Check error message for quota keywords
+      const msg = (error.message || '').toLowerCase();
+      if (msg.includes('quota') || msg.includes('limit') || 
+          msg.includes('network') || msg.includes('offline')) return true;
+      return false;
+    }
+    
+    const outbox = {
+      get() {
+        try {
+          return JSON.parse(localStorage.getItem(OUTBOX_KEY) || '[]');
+        } catch { return []; }
+      },
+      save(queue) {
+        try {
+          localStorage.setItem(OUTBOX_KEY, JSON.stringify(queue));
+        } catch (e) {
+          console.error('Outbox save failed (localStorage full?):', e);
+        }
+      },
+      add(op) {
+        const queue = this.get();
+        // Dedupe: if same collection+docId already queued, replace with latest
+        const existingIdx = queue.findIndex(x => 
+          x.collection === op.collection && x.docId === op.docId
+        );
+        const item = {
+          id: Date.now() + '_' + Math.random().toString(36).slice(2,8),
+          ...op,
+          queued_at: Date.now(),
+          retries: 0
+        };
+        if (existingIdx !== -1) {
+          // Same doc - replace (latest write wins)
+          queue[existingIdx] = item;
+        } else {
+          queue.push(item);
+        }
+        // Cap size
+        if (queue.length > MAX_OUTBOX_SIZE) queue.shift();
+        this.save(queue);
+        console.warn(`📥 Outbox queued: ${op.op} ${op.collection}/${op.docId} (total: ${queue.length})`);
+        // Update UI badge
+        if (typeof App !== 'undefined' && App.render) {
+          try { App.render(); } catch {}
+        }
+      },
+      count() { return this.get().length; },
+      async flush() {
+        const queue = this.get();
+        if (queue.length === 0) return { synced: 0, failed: 0 };
+        
+        console.log(`📤 Outbox: attempting to flush ${queue.length} pending operations...`);
+        const remaining = [];
+        let synced = 0;
+        
+        for (const item of queue) {
+          try {
+            if (item.op === 'set') {
+              await fbDb.collection(item.collection).doc(String(item.docId)).set(item.data);
+            } else if (item.op === 'delete') {
+              await fbDb.collection(item.collection).doc(String(item.docId)).delete();
+            }
+            synced++;
+            console.log(`  ✓ Synced ${item.op}: ${item.collection}/${item.docId}`);
+          } catch (e) {
+            item.retries = (item.retries || 0) + 1;
+            item.last_error = e.code || e.message;
+            item.last_attempt = Date.now();
+            if (item.retries < MAX_RETRIES && isRetriableError(e)) {
+              remaining.push(item);
+            } else {
+              console.error(`✗ Giving up: ${item.collection}/${item.docId} after ${item.retries} retries · ${item.last_error}`);
+            }
+          }
+        }
+        
+        this.save(remaining);
+        
+        if (synced > 0) {
+          console.log(`✅ Outbox: ${synced} synced, ${remaining.length} still pending`);
+          if (typeof toast === 'function') toast(`☁ ${synced} pending operations synced`);
+          if (typeof App !== 'undefined' && App.render) {
+            try { App.render(); } catch {}
+          }
+        }
+        
+        return { synced, failed: remaining.length };
+      },
+      clear() {
+        localStorage.removeItem(OUTBOX_KEY);
+      }
+    };
+    
+    // Expose for UI badge + debugging
+    window.__outbox = outbox;
+    
+    // Auto-flush every 60 seconds
+    setInterval(() => outbox.flush().catch(console.error), 60000);
+    
+    // Flush immediately when network comes back
+    window.addEventListener('online', () => {
+      console.log('🌐 Network restored, flushing outbox...');
+      outbox.flush().catch(console.error);
+    });
+    
+    // Flush 5 seconds after page load (in case quota reset overnight)
+    setTimeout(() => outbox.flush().catch(console.error), 5000);
+    
     // ========== Cloud API ==========
     window.Cloud = {
       enabled: true,
@@ -90,13 +224,22 @@ window.__firebaseStatus = { stage: 'loading', error: null };
       // Expose for bootstrap to call before Firestore reads
       ensureAuth: ensureSharedAuth,
       
+      // Outbox API for UI components
+      outboxCount: () => outbox.count(),
+      outboxFlush: () => outbox.flush(),
+      outboxClear: () => outbox.clear(),
+      
       async setDoc(collectionName, docId, data) {
         try {
           const clean = JSON.parse(JSON.stringify(data));
           await fbDb.collection(collectionName).doc(String(docId)).set(clean);
           return true;
         } catch (e) {
-          console.error("Cloud.setDoc error:", collectionName, docId, e);
+          console.error("Cloud.setDoc error:", collectionName, docId, e.code || e.message);
+          // Queue for retry if error is retriable (quota/network/temporary)
+          if (isRetriableError(e)) {
+            outbox.add({ op: 'set', collection: collectionName, docId, data });
+          }
           return false;
         }
       },
@@ -105,7 +248,10 @@ window.__firebaseStatus = { stage: 'loading', error: null };
           await fbDb.collection(collectionName).doc(String(docId)).delete();
           return true;
         } catch (e) {
-          console.error("Cloud.deleteDoc error:", e);
+          console.error("Cloud.deleteDoc error:", e.code || e.message);
+          if (isRetriableError(e)) {
+            outbox.add({ op: 'delete', collection: collectionName, docId });
+          }
           return false;
         }
       },
@@ -183,7 +329,10 @@ async batchSet(collectionName, items, keyField = 'id') {
       batchSet: async () => false,
       subscribe: () => {},
       unsubscribeAll: () => {},
-      ensureAuth: async () => false   // offline mode - no auth possible
+      ensureAuth: async () => false,  // offline mode - no auth possible
+      outboxCount: () => 0,
+      outboxFlush: async () => ({ synced: 0, failed: 0 }),
+      outboxClear: () => {}
     };
     window.dispatchEvent(new Event('cloud-ready'));
   }
@@ -2785,6 +2934,17 @@ const App = {
           </div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
+              // Outbox indicator - shows when there are pending writes
+              const pending = window.Cloud?.outboxCount ? window.Cloud.outboxCount() : 0;
+              if (pending > 0) {
+                return `<div onclick="App.openOutboxStatus()" title="${pending} pending operations - click for details" style="position:relative;cursor:pointer;padding:4px 10px;background:#FEF3C7;border:1px solid #F59E0B;border-radius:14px;font-size:11px;font-weight:800;color:#92400E;display:flex;align-items:center;gap:4px;">
+                  <span>⏳</span>
+                  <span>${pending}</span>
+                </div>`;
+              }
+              return '';
+            })()}
+            ${(() => {
               const unread = DB.unreadCount(user.id);
               return `<div onclick="App.openNotifications()" style="position:relative;cursor:pointer;width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:var(--cream-2);border-radius:50%;border:1px solid var(--border);">
                 <span style="font-size:16px;">🔔</span>
@@ -4691,6 +4851,71 @@ ${isAdminLike ? `
     if (!staff) return;
     this.state.staffFilter = staffId;
     this.goto('admin-customers');
+  },
+  
+  // ============ OUTBOX STATUS / RETRY ============
+  // Shows pending Firestore operations (queued due to quota/network errors)
+  // Allows manual flush retry
+  openOutboxStatus() {
+    const queue = window.__outbox?.get() || [];
+    
+    const renderItem = (item, i) => {
+      const age = Math.floor((Date.now() - item.queued_at) / 1000);
+      const ageStr = age < 60 ? `${age}s ago` : 
+                     age < 3600 ? `${Math.floor(age/60)}m ago` : 
+                     `${Math.floor(age/3600)}h ago`;
+      return `
+        <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:8px;padding:10px;margin-bottom:6px;font-size:11px;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;">
+            <strong style="color:var(--ink);">${item.op.toUpperCase()} ${item.collection}/${item.docId}</strong>
+            <span style="color:var(--ink-3);font-size:10px;">${ageStr}</span>
+          </div>
+          ${item.last_error ? `<div style="color:#C53030;font-size:10px;">⚠ ${item.last_error}</div>` : ''}
+          <div style="color:var(--ink-3);font-size:10px;">Retries: ${item.retries || 0}</div>
+        </div>
+      `;
+    };
+    
+    showModal(`
+      <div class="modal-title">⏳ Pending Cloud Sync</div>
+      <div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:8px;padding:10px;margin-bottom:12px;font-size:12px;color:#92400E;">
+        <strong>${queue.length} operation${queue.length !== 1 ? 's' : ''} pending sync.</strong><br>
+        Data 已 saved locally. Will auto-retry every 60s + when network/quota recovers.
+      </div>
+      
+      <div style="max-height:50vh;overflow-y:auto;">
+        ${queue.length === 0 ? 
+          '<div style="text-align:center;padding:30px 0;color:var(--ink-3);">✅ All synced!</div>' :
+          queue.map(renderItem).join('')
+        }
+      </div>
+      
+      ${queue.length > 0 ? `
+        <button class="submit-btn" onclick="App.flushOutboxNow()" style="margin-top:10px;">
+          🔄 Try Sync Now
+        </button>
+      ` : ''}
+      <button class="btn-secondary" onclick="hideModal()" style="margin-top:6px;">Close</button>
+    `);
+  },
+  
+  async flushOutboxNow() {
+    toast('🔄 Trying to sync...');
+    try {
+      const result = await window.Cloud.outboxFlush();
+      if (result.synced > 0) {
+        toast(`✓ ${result.synced} synced! ${result.failed > 0 ? `(${result.failed} still pending)` : ''}`);
+      } else if (result.failed > 0) {
+        toast(`⚠ Still ${result.failed} pending — Firestore may still be limited`);
+      } else {
+        toast('✓ Nothing to sync');
+      }
+      hideModal();
+      this.render();
+    } catch (e) {
+      console.error('Manual flush error:', e);
+      toast('⚠ Sync error - check console');
+    }
   },
   
   openNotifications() {
