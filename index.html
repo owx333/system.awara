@@ -1727,6 +1727,116 @@ const Logic = {
     return user && user.role === 'solo';
   },
   
+  // Find the primary Manager user (for resign re-assignment) - first active manager
+  // If no manager exists, returns null (caller must handle)
+  findManager() {
+    return DB.users().find(u => u.role === 'manager' && !u.inactive);
+  },
+  
+  // Transfer all cases owned by a user (CS or Leader) to the Manager
+  // Used when a staff resigns - returns count of cases transferred
+  transferCasesFromUserToManager(userId) {
+    const manager = this.findManager();
+    if (!manager) return { ok: false, count: 0, error: 'No active Manager found' };
+    
+    const allCases = DB.cases();
+    const now = Date.now();
+    let transferred = 0;
+    const updatedCases = [];
+    
+    allCases.forEach(c => {
+      let changed = false;
+      const newCase = { ...c };
+      
+      // CS resigning - transfer their cases (where they collected the payslip)
+      if (c.source_cs_id === userId) {
+        newCase.source_cs_id = manager.id;
+        newCase.transferred_from_cs = userId;
+        newCase.transferred_at = now;
+        changed = true;
+      }
+      
+      // Leader/Solo resigning - transfer their team's cases
+      if (c.leader_id === userId) {
+        newCase.leader_id = manager.id;
+        newCase.transferred_from_leader = userId;
+        newCase.transferred_at = now;
+        changed = true;
+      }
+      
+      if (changed) {
+        transferred++;
+        updatedCases.push(newCase);
+      }
+    });
+    
+    // Update local + cloud (batch)
+    if (transferred > 0) {
+      const cases = DB.cases();
+      updatedCases.forEach(uc => {
+        const idx = cases.findIndex(x => x.id === uc.id);
+        if (idx !== -1) cases[idx] = uc;
+      });
+      DB.set(DB.K.cases, cases);
+      
+      // Sync to Firestore
+      if (window.Cloud?.connected) {
+        updatedCases.forEach(uc => {
+          window.Cloud.setDoc('cases', uc.id, uc).catch(e => 
+            console.error('Failed to sync transferred case:', uc.id, e)
+          );
+        });
+      }
+    }
+    
+    return { ok: true, count: transferred, manager: manager.name };
+  },
+  
+  // When CS promotes to Solo/Leader, their old cases (as source_cs_id) 
+  // become their OWN cases - leader_id changes from old leader to themselves
+  promoteCSCases(userId, newRole) {
+    if (newRole !== 'solo' && newRole !== 'leader') return { count: 0 };
+    
+    const allCases = DB.cases();
+    const now = Date.now();
+    let promoted = 0;
+    const updatedCases = [];
+    
+    allCases.forEach(c => {
+      // Only modify cases where THIS user was the CS who collected the payslip
+      // AND they currently belong to a different leader (old setup)
+      if (c.source_cs_id === userId && c.leader_id !== userId) {
+        const newCase = {
+          ...c,
+          leader_id: userId,             // they now own as leader
+          promoted_from_leader: c.leader_id,
+          promoted_at: now
+        };
+        updatedCases.push(newCase);
+        promoted++;
+      }
+    });
+    
+    if (promoted > 0) {
+      const cases = DB.cases();
+      updatedCases.forEach(uc => {
+        const idx = cases.findIndex(x => x.id === uc.id);
+        if (idx !== -1) cases[idx] = uc;
+      });
+      DB.set(DB.K.cases, cases);
+      
+      if (window.Cloud?.connected) {
+        updatedCases.forEach(uc => {
+          window.Cloud.setDoc('cases', uc.id, uc).catch(e => 
+            console.error('Failed to sync promoted case:', uc.id, e)
+          );
+        });
+      }
+    }
+    
+    return { count: promoted };
+  },
+  
   currentMonthYM() {
     return new Date().toISOString().slice(0,7);
   },
@@ -5291,10 +5401,12 @@ ${isAdminLike ? `
         const attempts = DB.loginAttempts(userId);
         const isLocked = attempts.lockedAt;
         const u2 = DB.user(userId);
+        const isSelf = userId === Auth.current().id;
         return `
           ${isLocked ? `<button class="btn-secondary" style="color: #059669; border-color: rgba(5,150,105,0.3); margin-top: 8px; width: 100%;" onclick="App.unlockUser('${userId}')">🔓 Buka Semula Akaun (Dikunci)</button>` : ''}
-          ${u2?.inactive ? `<button class="btn-secondary" style="color: #059669; border-color: rgba(5,150,105,0.3); margin-top: 8px; width: 100%;" onclick="App.reactivateStaff('${userId}')">✅ Aktifkan Semula</button>` : (userId !== Auth.current().id ? `<button class="btn-secondary" style="color: #B45309; border-color: rgba(180,83,9,0.3); margin-top: 8px; width: 100%;" onclick="App.deactivateStaff('${userId}')">⏸ Deactivate (Inactive)</button>` : '')}
-          ${userId !== Auth.current().id ? `<button class="btn-secondary" style="color: var(--danger); border-color: rgba(184, 66, 58, 0.3); margin-top: 8px;" onclick="App.deleteUser('${userId}')">Delete Staff</button>` : ''}
+          ${u2?.inactive ? `<button class="btn-secondary" style="color: #059669; border-color: rgba(5,150,105,0.3); margin-top: 8px; width: 100%;" onclick="App.reactivateStaff('${userId}')">✅ Aktifkan Semula</button>` : (!isSelf ? `<button class="btn-secondary" style="color: #B45309; border-color: rgba(180,83,9,0.3); margin-top: 8px; width: 100%;" onclick="App.deactivateStaff('${userId}')">⏸ Deactivate (Inactive)</button>` : '')}
+          ${!isSelf && !u2?.inactive && u2?.role !== 'manager' && u2?.role !== 'admin' ? `<button class="btn-secondary" style="color: #DC2626; border-color: rgba(220,38,38,0.3); margin-top: 8px; width: 100%;" onclick="App.resignStaff('${userId}')">🚪 Resign · Pindah Cases ke Manager</button>` : ''}
+          ${!isSelf ? `<button class="btn-secondary" style="color: var(--danger); border-color: rgba(184, 66, 58, 0.3); margin-top: 8px;" onclick="App.deleteUser('${userId}')">Delete Staff (Permanent)</button>` : ''}
         `;
       })()}
     `);
@@ -5310,14 +5422,29 @@ ${isAdminLike ? `
     if (!name) { toast('Name required'); return; }
     if (role === 'cs' && !leaderId) { toast('Pilih Team Leader untuk CS'); return; }
     
+    // Detect promotion: was CS, now Solo or Team Leader → auto-transfer their cases
+    const existingUser = DB.user(userId);
+    const isPromotion = existingUser && existingUser.role === 'cs' && (role === 'solo' || role === 'leader');
+    
     const updates = { name, role };
     if (branchId) updates.branch_id = branchId;
     updates.leader_id = role === 'cs' ? leaderId : null;
     if (pass) updates.password = pass;
     
     DB.updateUser(userId, updates);  // updateUser already syncs to Cloud
+    
+    // If promoted from CS, transfer their cases to themselves as leader
+    let promotedMsg = '';
+    if (isPromotion) {
+      const result = Logic.promoteCSCases(userId, role);
+      if (result.count > 0) {
+        promotedMsg = ` · ${result.count} cases promoted to own ownership 🎯`;
+        console.log(`Promotion: ${result.count} cases transferred to ${name} as new ${role}`);
+      }
+    }
+    
     hideModal();
-    toast('Staff updated' + (window.Cloud?.connected ? ' · synced ☁' : ''));
+    toast('Staff updated' + (window.Cloud?.connected ? ' · synced ☁' : '') + promotedMsg);
     this.render();
   },
   
@@ -5341,6 +5468,58 @@ ${isAdminLike ? `
     DB.updateUser(userId, { inactive: false });
     hideModal();
     toast('Staff aktif semula ✅');
+    this.render();
+  },
+
+  // ============ RESIGN STAFF ============
+  // When a staff resigns: transfer all their cases to Manager, then deactivate them.
+  // Manager can later reassign to other CS via Edit Customer.
+  resignStaff(userId) {
+    const u = DB.user(userId);
+    if (!u) return;
+    
+    // Check Manager exists
+    const manager = Logic.findManager();
+    if (!manager) {
+      alert('⚠ Tiada Manager active sekarang. Sila create satu Manager dulu sebelum resign staff ini.');
+      return;
+    }
+    
+    // Count cases that will be transferred (preview)
+    const allCases = DB.cases();
+    const csCases = allCases.filter(c => c.source_cs_id === userId).length;
+    const leaderCases = allCases.filter(c => c.leader_id === userId).length;
+    const totalCases = new Set([
+      ...allCases.filter(c => c.source_cs_id === userId).map(c => c.id),
+      ...allCases.filter(c => c.leader_id === userId).map(c => c.id)
+    ]).size;
+    
+    // Confirm
+    const msg = `Resign ${u.name}?\n\n` +
+      `• ${totalCases} case(s) akan dipindah ke Manager ${manager.name}\n` +
+      `   (${csCases} sebagai source CS, ${leaderCases} sebagai leader)\n` +
+      `• Staff akan jadi inactive (tak boleh login)\n` +
+      `• Manager kemudian boleh reassign cases ini\n\n` +
+      `Continue?`;
+    
+    if (!confirm(msg)) return;
+    
+    // Step 1: Transfer cases
+    const result = Logic.transferCasesFromUserToManager(userId);
+    if (!result.ok) {
+      alert('Error: ' + result.error);
+      return;
+    }
+    
+    // Step 2: Deactivate staff (mark inactive + record resign date)
+    DB.updateUser(userId, { 
+      inactive: true, 
+      resigned: true,
+      resigned_at: Date.now() 
+    });
+    
+    hideModal();
+    toast(`✅ ${u.name} resigned · ${result.count} cases dipindah ke ${manager.name}`);
     this.render();
   },
 
