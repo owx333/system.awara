@@ -13,6 +13,8 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<!-- SheetJS for Excel .xlsx export (Multi-sheet support) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 window.__firebaseStatus = { stage: 'loading', error: null };
 
@@ -39,6 +41,21 @@ window.__firebaseStatus = { stage: 'loading', error: null };
     const fbAuth = firebase.auth();
     window.__firebaseStatus.stage = 'firestore-initialized';
     
+    // ========== LOGGER (Cleanup console noise) ==========
+    // By default, noisy debug logs are HIDDEN. Errors/warnings/important info always shown.
+    // To enable verbose debug: open Console and run:
+    //   localStorage.setItem('awara_debug', '1'); location.reload();
+    // To disable: localStorage.removeItem('awara_debug'); location.reload();
+    const DEBUG_MODE = localStorage.getItem('awara_debug') === '1';
+    const Logger = {
+      debug: DEBUG_MODE ? console.log.bind(console, '[DEBUG]') : () => {},
+      info:  console.log.bind(console),    // Important startup/success - always show
+      warn:  console.warn.bind(console),   // Always show warnings
+      error: console.error.bind(console)   // Always show errors
+    };
+    window.Logger = Logger;
+    if (DEBUG_MODE) console.log('🔧 DEBUG mode active · verbose logs enabled');
+    
     // ========== SHARED AUTH (Layer 2 Security) ==========
     // Auto-signin to a shared service account so Firestore rules can require auth
     // 14 staff不需要做任何事 — completely invisible. App login still uses Name+Password.
@@ -51,7 +68,7 @@ window.__firebaseStatus = { stage: 'loading', error: null };
     async function ensureSharedAuth() {
       // Already signed in? skip
       if (fbAuth.currentUser) {
-        console.log('🔐 Already signed in:', fbAuth.currentUser.email);
+        Logger.debug('🔐 Already signed in:', fbAuth.currentUser.email);
         return true;
       }
       try {
@@ -157,7 +174,7 @@ window.__firebaseStatus = { stage: 'loading', error: null };
         const queue = this.get();
         if (queue.length === 0) return { synced: 0, failed: 0 };
         
-        console.log(`📤 Outbox: attempting to flush ${queue.length} pending operations...`);
+        Logger.debug(`📤 Outbox: attempting to flush ${queue.length} pending operations...`);
         const remaining = [];
         let synced = 0;
         
@@ -169,7 +186,7 @@ window.__firebaseStatus = { stage: 'loading', error: null };
               await fbDb.collection(item.collection).doc(String(item.docId)).delete();
             }
             synced++;
-            console.log(`  ✓ Synced ${item.op}: ${item.collection}/${item.docId}`);
+            Logger.debug(`  ✓ Synced ${item.op}: ${item.collection}/${item.docId}`);
           } catch (e) {
             item.retries = (item.retries || 0) + 1;
             item.last_error = e.code || e.message;
@@ -185,7 +202,7 @@ window.__firebaseStatus = { stage: 'loading', error: null };
         this.save(remaining);
         
         if (synced > 0) {
-          console.log(`✅ Outbox: ${synced} synced, ${remaining.length} still pending`);
+          Logger.debug(`✅ Outbox: ${synced} synced, ${remaining.length} still pending`);
           if (typeof toast === 'function') toast(`☁ ${synced} pending operations synced`);
           if (typeof App !== 'undefined' && App.render) {
             try { App.render(); } catch {}
@@ -207,7 +224,7 @@ window.__firebaseStatus = { stage: 'loading', error: null };
     
     // Flush immediately when network comes back
     window.addEventListener('online', () => {
-      console.log('🌐 Network restored, flushing outbox...');
+      Logger.debug('🌐 Network restored, flushing outbox...');
       outbox.flush().catch(console.error);
     });
     
@@ -1400,11 +1417,38 @@ const DB = {
     notifications: 'awara_notifications', loginAttempts: 'awara_login_attempts'
   },
   
+  // ============ IN-MEMORY CACHE (Performance) ============
+  // Avoids repeated JSON.parse on every DB.users()/cases() call.
+  // Invalidated automatically when DB.set() is called for the same key.
+  _cache: {},
+  
+  // Lookup index for O(1) by-id access (rebuilt on first call, invalidated on set)
+  _lookupCache: {},
+  
   get(key, def = []) {
-    try { return JSON.parse(localStorage.getItem(key)) ?? def; } catch { return def; }
+    if (this._cache.hasOwnProperty(key)) return this._cache[key];
+    try { 
+      const val = JSON.parse(localStorage.getItem(key)) ?? def;
+      this._cache[key] = val;
+      return val;
+    } catch { return def; }
   },
   set(key, val) {
-    try { localStorage.setItem(key, JSON.stringify(val)); return true; } catch { return false; }
+    try { 
+      localStorage.setItem(key, JSON.stringify(val));
+      this._cache[key] = val;            // Update cache
+      delete this._lookupCache[key];     // Invalidate id-lookup for this key
+      return true; 
+    } catch { return false; }
+  },
+  
+  // O(1) lookup by id - builds Map index on first call, cached until set() invalidates
+  _getById(key, id) {
+    if (!this._lookupCache[key]) {
+      const arr = this.get(key, []);
+      this._lookupCache[key] = new Map(arr.map(item => [item.id, item]));
+    }
+    return this._lookupCache[key].get(id) || null;
   },
   
   seed(force = false) {
@@ -1422,11 +1466,11 @@ const DB = {
   
   // Users
   users() { return this.get(this.K.users); },
-  user(id) { return this.users().find(u => u.id === id); },
+  user(id) { return this._getById(this.K.users, id); },
 
   // Branches
   branches() { return this.get(this.K.branches, SEED_BRANCHES); },
-  branch(id) { return this.branches().find(b => b.id === id); },
+  branch(id) { return this._getById(this.K.branches, id); },
   saveBranches(list) { 
     // Capture old list BEFORE updating localStorage (to detect deletions)
     const oldList = this.branches();
@@ -1484,7 +1528,7 @@ const DB = {
   
   // Cases
   cases() { return this.get(this.K.cases); },
-  caseById(id) { return this.cases().find(c => c.id === id); },
+  caseById(id) { return this._getById(this.K.cases, id); },
   
   casesByIC(ic) {
     if (!ic) return [];
@@ -1522,6 +1566,42 @@ const DB = {
     cases.unshift(newCase);
     this.set(this.K.cases, cases);
     if (window.Cloud?.connected) window.Cloud.setDoc('cases', newCase.id, newCase);
+    
+    // ============ NOTIFY TL/SOLO WHEN CS SUBMITS NEW PAYSLIP ============
+    // Only fires for CS (not when manager/admin creates a case directly)
+    // Notifies just the case leader to avoid notification overload
+    if (user && user.role === 'cs' && newCase.leader_id && newCase.leader_id !== user.id) {
+      const sourceCs = this.user(newCase.source_cs_id);
+      const leader = this.user(newCase.leader_id);
+      const branch = this.branch(newCase.branch_id);
+      
+      const notifData = {
+        type: 'customer_new',
+        severity: 'medium',
+        icon: '📥',
+        title: 'New Payslip from CS',
+        message: `${user.name} submitted payslip for "${newCase.customer_name}"${isDuplicate ? ' (DUPLICATE)' : ''}`,
+        actor_id: user.id,
+        actor_name: user.name,
+        actor_role: 'cs',
+        case_id: newCase.id,
+        customer_name: newCase.customer_name,
+        customer_ic: newCase.ic || '',
+        customer_phone: newCase.phone || '',
+        case_status: newCase.status || 'new',
+        source_cs_id: newCase.source_cs_id,
+        source_cs_name: sourceCs?.name || '',
+        leader_id: newCase.leader_id,
+        leader_name: leader?.name || '',
+        branch_id: newCase.branch_id || '',
+        branch_name: branch?.name || '',
+        is_duplicate: isDuplicate,
+        created_at: Date.now()
+      };
+      
+      // Just notify the leader (don't overwhelm with manager/kerani for every payslip)
+      this.addNotification(newCase.leader_id, notifData);
+    }
     
     // If duplicate, add remark to ORIGINAL case for tracking
     if (isDuplicate && originalCase) {
@@ -1570,61 +1650,82 @@ const DB = {
     this.set(this.K.cases, cases);
     if (window.Cloud?.connected) window.Cloud.setDoc('cases', id, cases[idx]);
     
-    // Notification logic based on who edits
-    const editorRole = user?.role;
-    if (Object.keys(changes).length > 0) {
+    // ============ NOTIFICATION ON UPDATE ============
+    // Uses unified Logic.getNotifyRecipientsForCase + rich notification data
+    if (user && Object.keys(changes).length > 0) {
       const updatedCase = cases[idx];
       const changedFields = Object.keys(changes);
       const isStatusChange = changedFields.includes('status');
-      const notifTitle = isStatusChange
-        ? `Status dikemaskini: ${STATUS_LABELS[changes.status?.to] || changes.status?.to}`
-        : `Maklumat pelanggan dikemaskini`;
-      const notifBody = `${updatedCase.customer_name} · dikemaskini oleh ${user?.name || 'Admin'}${isStatusChange ? ` → ${STATUS_LABELS[changes.status?.to] || changes.status?.to}` : ` (${changedFields.filter(f => f !== 'status').slice(0,3).join(', ')})`}`;
-
-      const notify = (userId) => {
-        if (userId && userId !== user?.id) {
-          this.addNotification(userId, { title: notifTitle, body: notifBody, caseId: id });
-        }
+      const newStatus = changes.status?.to;
+      const oldStatus = changes.status?.from;
+      
+      const sourceCs = this.user(updatedCase.source_cs_id);
+      const leader = this.user(updatedCase.leader_id);
+      const branch = this.branch(updatedCase.branch_id);
+      
+      // Build display of what changed (max 3 fields for brevity)
+      const fieldLabels = {
+        status: 'Status',
+        customer_name: 'Name',
+        ic: 'IC',
+        phone: 'Phone',
+        pendapatan: 'Pendapatan',
+        potongan: 'Potongan',
+        package_id: 'Package',
+        loan_amount: 'Loan Amount',
+        tenor: 'Tenor',
+        case_type: 'Case Type',
+        date_submitted: 'Date Submitted',
+        date_approved: 'Date Approved',
+        date_disbursed: 'Date Disbursed',
+        approved_amount: 'Approved Amount',
+        disbursed_amount: 'Disbursed Amount',
+        anm_password: 'ANM Password',
+        hrmis_password: 'HRMIS Password',
+        majikan: 'Majikan',
+        remark_admin: 'Admin Remark'
       };
-
-      const allUsers = this.users();
-      const caseBranch = updatedCase.branch_id;
-
-// Notification rules (per role of editor):
-      // cs     → case owner leader only (leader_id) + manager
-      // solo   → admin + manager only (NOT other leaders)
-      // leader → admin + manager only (NOT other leaders)
-      // kerani → manager, case owner (leader_id or solo), hq
-      // manager→ admin, case owner (leader_id or solo), hq
-      // hq     → admin, manager
-      // admin  → hq, manager
-      const caseOwner = updatedCase.leader_id; // whoever owns the case (leader or solo)
-      if (editorRole === 'cs') {
-        notify(caseOwner);
-        allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-      } else if (editorRole === 'solo') {
-        allUsers.filter(u => u.role === 'kerani' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-        allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-      } else if (editorRole === 'leader') {
-        allUsers.filter(u => u.role === 'admin').forEach(u => notify(u.id));
-        allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-      } else if (editorRole === 'kerani') {
-        allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-        notify(caseOwner);
-        allUsers.filter(u => u.role === 'hq').forEach(u => notify(u.id));
-      } else if (editorRole === 'manager') {
-        allUsers.filter(u => u.role === 'admin').forEach(u => notify(u.id));
-        notify(caseOwner);
-        allUsers.filter(u => u.role === 'hq').forEach(u => notify(u.id));
-      } else if (editorRole === 'hq') {
-        allUsers.filter(u => u.role === 'admin').forEach(u => notify(u.id));
-        allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-} else if (editorRole === 'admin') {
-  allUsers.filter(u => u.role === 'hq').forEach(u => notify(u.id));
-  allUsers.filter(u => u.role === 'manager' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-  allUsers.filter(u => u.role === 'kerani' && u.branch_id === caseBranch).forEach(u => notify(u.id));
-  notify(caseOwner);
-}
+      const displayFields = changedFields
+        .filter(f => f !== 'audit_log' && f !== 'remarks')
+        .slice(0, 3)
+        .map(f => fieldLabels[f] || f);
+      const moreFields = changedFields.length - displayFields.length;
+      const changesText = displayFields.join(', ') + (moreFields > 0 ? ` +${moreFields} more` : '');
+      
+      const notifData = {
+        type: isStatusChange ? 'customer_status_changed' : 'customer_updated',
+        severity: isStatusChange ? 'medium' : 'low',
+        icon: isStatusChange ? '🔄' : '✏️',
+        title: isStatusChange 
+          ? `Status Changed: ${STATUS_LABELS[newStatus] || newStatus}`
+          : 'Customer Updated',
+        message: `${user.name} (${ROLE_LABELS[user.role] || user.role}) ${isStatusChange ? `changed status of "${updatedCase.customer_name}" to ${STATUS_LABELS[newStatus] || newStatus}` : `updated "${updatedCase.customer_name}" (${changesText})`}`,
+        actor_id: user.id,
+        actor_name: user.name,
+        actor_role: user.role,
+        case_id: id,
+        customer_name: updatedCase.customer_name,
+        customer_ic: updatedCase.ic || '',
+        customer_phone: updatedCase.phone || '',
+        case_status: updatedCase.status || '',
+        old_status: oldStatus || '',
+        new_status: newStatus || '',
+        package_id: updatedCase.package_id || '',
+        loan_amount: updatedCase.loan_amount || 0,
+        source_cs_id: updatedCase.source_cs_id || '',
+        source_cs_name: sourceCs?.name || '',
+        leader_id: updatedCase.leader_id || '',
+        leader_name: leader?.name || '',
+        branch_id: updatedCase.branch_id || '',
+        branch_name: branch?.name || '',
+        changed_fields: changedFields.filter(f => f !== 'audit_log'),
+        changes_summary: changesText,
+        updated_at: Date.now()
+      };
+      
+      // Use Logic helper to determine recipients (centralized rules)
+      const recipientIds = Logic.getNotifyRecipientsForCase(user.id, updatedCase);
+      recipientIds.forEach(uid => this.addNotification(uid, notifData));
     }
     
     return cases[idx];
@@ -1874,7 +1975,7 @@ const recipients = allUsers.filter(u =>
             userId, 
             items: all[userId] || [] 
           });
-          console.log(`🔔 Self-notif written for ${userId}`);
+          Logger.debug(`🔔 Self-notif written for ${userId}`);
         } else {
           // Cross-user: MUST fetch existing first to avoid overwriting their data!
           const existingDoc = await window.Cloud.getDoc('notifications', userId);
@@ -1931,8 +2032,26 @@ const recipients = allUsers.filter(u =>
 };
 
 // ==================== AUTH ====================
+// ==================== PASSWORD HASHING ====================
+// Uses Web Crypto API SHA-256 (built-in browser, no library needed)
+// Backward compatible: existing plaintext passwords auto-migrate on next login
+const Hash = {
+  async sha256(text) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  },
+  
+  // Returns true if the value looks like a SHA-256 hash (64 hex chars)
+  isHashed(value) {
+    return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  }
+};
+
 const Auth = {
-  login(nameId, password) {
+  async login(nameId, password) {
     const user = DB.users().find(u => u.id === nameId.toLowerCase() || u.name.toLowerCase() === nameId.toLowerCase());
     if (!user) return { ok: false, error: 'Name ID tidak dijumpai' };
     
@@ -1948,7 +2067,26 @@ const Auth = {
       return { ok: false, locked: true, error: `Akaun dikunci selepas 3 cubaan gagal. Sila hubungi ${manager ? manager.name : 'Manager'} untuk buka semula.` };
     }
     
-    if (user.password !== password) {
+    // Password verification: support both legacy plaintext + new hashed
+    let passwordMatches = false;
+    const stored = user.password;
+    
+    if (Hash.isHashed(stored)) {
+      // New format: SHA-256 hash. Compare hashes.
+      const inputHash = await Hash.sha256(password);
+      passwordMatches = (inputHash === stored);
+    } else {
+      // Legacy plaintext: compare directly, then auto-upgrade if matched
+      passwordMatches = (stored === password);
+      if (passwordMatches) {
+        // Migrate to hashed format silently
+        const newHash = await Hash.sha256(password);
+        DB.updateUser(user.id, { password: newHash });
+        console.log(`🔒 Password auto-migrated to hashed for user: ${user.name}`);
+      }
+    }
+    
+    if (!passwordMatches) {
       const rec = DB.recordLoginFail(user.id);
       const remaining = 3 - rec.count;
       if (rec.count >= 3) {
@@ -2161,6 +2299,94 @@ const Logic = {
   // Find all CS users who were under a Team Leader (used for warning before demotion)
   csUnderLeader(leaderId) {
     return DB.users().filter(u => u.role === 'cs' && u.leader_id === leaderId && !u.inactive);
+  },
+  
+  // ============ NOTIFICATION RECIPIENT RESOLVER ============
+  // Returns list of user IDs to notify when an action happens on a customer/case.
+  // Centralizes the per-role notification rules so they stay consistent.
+  //
+  // Rules (per user requirements):
+  //   - Boss修改   → notify HQ + branch(manager, kerani, case's TL/Solo)
+  //   - HQ修改     → notify Boss + branch(manager, kerani, case's TL/Solo)
+  //   - Manager修改 → notify Boss + HQ + branch(kerani, case's TL/Solo)
+  //   - Kerani修改 → notify Boss + HQ + branch(manager, case's TL/Solo)
+  //   - TL/Solo修改 → notify Boss + HQ + branch(manager, kerani)
+  //   - CS修改     → notify branch(case's TL/Solo, manager)
+  //
+  // Always excludes:
+  //   - The actor themselves
+  //   - Inactive users
+  getNotifyRecipientsForCase(actorId, caseObj, opts = {}) {
+    const actor = DB.user(actorId);
+    if (!actor) return [];
+    
+    const actorRole = actor.role;
+    const caseBranchId = caseObj.branch_id || DB.user(caseObj.leader_id || caseObj.source_cs_id)?.branch_id;
+    const caseLeaderId = caseObj.leader_id;
+    const allUsers = DB.users().filter(u => !u.inactive);
+    
+    const recipientIds = new Set();
+    
+    const addByRole = (role, sameBranchOnly = false) => {
+      allUsers
+        .filter(u => u.role === role && (!sameBranchOnly || u.branch_id === caseBranchId))
+        .forEach(u => recipientIds.add(u.id));
+    };
+    
+    const addCaseLeader = () => {
+      if (caseLeaderId) {
+        const leader = DB.user(caseLeaderId);
+        if (leader && !leader.inactive && (leader.role === 'leader' || leader.role === 'solo')) {
+          recipientIds.add(caseLeaderId);
+        }
+      }
+    };
+    
+    if (actorRole === 'admin') {
+      // Boss修改 → HQ + same-branch manager, kerani, case TL/Solo
+      addByRole('hq');
+      addByRole('manager', true);
+      addByRole('kerani', true);
+      addCaseLeader();
+    } else if (actorRole === 'hq') {
+      // HQ修改 → Boss + same-branch manager, kerani, case TL/Solo
+      addByRole('admin');
+      addByRole('manager', true);
+      addByRole('kerani', true);
+      addCaseLeader();
+    } else if (actorRole === 'manager') {
+      // Manager修改 → Boss + HQ + same-branch kerani, case TL/Solo
+      addByRole('admin');
+      addByRole('hq');
+      addByRole('kerani', true);
+      addCaseLeader();
+    } else if (actorRole === 'kerani') {
+      // Kerani修改 → Boss + HQ + same-branch manager, case TL/Solo
+      addByRole('admin');
+      addByRole('hq');
+      addByRole('manager', true);
+      addCaseLeader();
+    } else if (actorRole === 'leader' || actorRole === 'solo') {
+      // TL/Solo修改 → Boss + HQ + same-branch manager, kerani
+      addByRole('admin');
+      addByRole('hq');
+      addByRole('manager', true);
+      addByRole('kerani', true);
+    } else if (actorRole === 'cs') {
+      // CS修改 → same-branch case TL/Solo + manager
+      addCaseLeader();
+      addByRole('manager', true);
+    }
+    
+    // Always exclude the actor themselves
+    recipientIds.delete(actorId);
+    
+    // For new case notifications, only notify the case leader (avoid overload)
+    if (opts.onlyLeader && caseLeaderId) {
+      return [caseLeaderId];
+    }
+    
+    return Array.from(recipientIds);
   },
   
   currentMonthYM() {
@@ -2696,6 +2922,85 @@ function fmtRM(n) { return 'RM ' + fmt(n); }
 function initials(name) { 
   return name.substring(0, 2).toUpperCase(); 
 }
+
+// ===== PHONE LINK HELPERS (mobile tap-to-call + WhatsApp) =====
+// Cleans phone to digits-only (for tel: + wa.me URLs)
+function cleanPhone(p) {
+  if (!p) return '';
+  return String(p).replace(/\D+/g, '');
+}
+// Format phone for display (e.g. 0123456789 → 012-345 6789)
+function fmtPhone(p) {
+  const c = cleanPhone(p);
+  if (!c) return p || '—';
+  if (c.length === 10) return c.slice(0, 3) + '-' + c.slice(3, 6) + ' ' + c.slice(6);
+  if (c.length === 11) return c.slice(0, 3) + '-' + c.slice(3, 7) + ' ' + c.slice(7);
+  return c;
+}
+// Returns HTML with clickable phone + WhatsApp icon
+function phoneLink(phone, inline = false) {
+  if (!phone) return '—';
+  const c = cleanPhone(phone);
+  if (!c) return phone;
+  const display = fmtPhone(phone);
+  const intlPhone = c.startsWith('60') ? c : (c.startsWith('0') ? '6' + c : c);
+  if (inline) {
+    return `<a href="tel:${c}" onclick="event.stopPropagation()" style="color:var(--primary);font-weight:700;text-decoration:none;">${display}</a> <a href="https://wa.me/${intlPhone}" target="_blank" onclick="event.stopPropagation()" style="color:#22C55E;text-decoration:none;font-size:12px;" title="WhatsApp">💬</a>`;
+  }
+  return `<a href="tel:${c}" onclick="event.stopPropagation()" style="color:var(--primary);font-weight:700;text-decoration:none;display:inline-flex;align-items:center;gap:4px;">📞 ${display}</a> <a href="https://wa.me/${intlPhone}" target="_blank" onclick="event.stopPropagation()" style="background:#25D366;color:white;padding:2px 8px;border-radius:6px;font-size:10px;font-weight:700;text-decoration:none;display:inline-flex;align-items:center;gap:3px;" title="Open WhatsApp">💬 WA</a>`;
+}
+
+// ===== EXCEL EXPORT HELPERS (using SheetJS / xlsx) =====
+// Supports multi-sheet workbooks. If SheetJS not loaded, falls back to CSV.
+//
+// Usage: downloadAsExcel('myreport.xlsx', [
+//   { name: 'Summary', rows: [['col1','col2'],['data1','data2']] },
+//   { name: 'Detail', rows: [...] }
+// ]);
+function downloadAsExcel(filename, sheets) {
+  if (typeof XLSX === 'undefined') {
+    console.warn('SheetJS not loaded, falling back to CSV');
+    // Combine all sheets into one CSV (first sheet only)
+    const firstSheet = sheets[0] || { rows: [] };
+    const csv = firstSheet.rows.map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename.replace(/\.xlsx$/, '.csv');
+    a.click();
+    URL.revokeObjectURL(url);
+    return false;
+  }
+  
+  const wb = XLSX.utils.book_new();
+  sheets.forEach(sheet => {
+    const ws = XLSX.utils.aoa_to_sheet(sheet.rows);
+    
+    // Auto-width columns (sample first 50 rows for performance)
+    const colWidths = [];
+    const sampleRows = sheet.rows.slice(0, 50);
+    if (sampleRows.length > 0) {
+      const maxCols = Math.max(...sampleRows.map(r => r.length));
+      for (let i = 0; i < maxCols; i++) {
+        let maxLen = 8;
+        sampleRows.forEach(r => {
+          const cellLen = String(r[i] || '').length;
+          if (cellLen > maxLen) maxLen = cellLen;
+        });
+        colWidths.push({ wch: Math.min(maxLen + 2, 40) });
+      }
+      ws['!cols'] = colWidths;
+    }
+    
+    // Sheet name: must be ≤31 chars, no special chars
+    const sheetName = (sheet.name || 'Sheet').replace(/[\\\/\?\*\[\]]/g, '_').substring(0, 31);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+  
+  XLSX.writeFile(wb, filename);
+  return true;
+}
 function pkgName(id) {
   const p = LOAN_PACKAGES.find(p => p.id === id);
   return p ? p.name : id;
@@ -2706,7 +3011,7 @@ function teamName(leaderId) {
 }
 function toast(msg) {
   const container = document.getElementById('toast-container');
-  if (!container) { console.log('[toast]', msg); return; }
+  if (!container) { Logger.debug('[toast]', msg); return; }
   const t = document.createElement('div');
   t.className = 'toast';
   t.textContent = msg;
@@ -2774,6 +3079,9 @@ const App = {
       case 'admin-weekly': 
         if (user.role === 'kerani') { this.state.currentScreen = 'admin-customers'; return this.render(); }
         content = this.renderAdminWeekly(user); break;
+      case 'admin-branch-compare':
+        if (!Permissions.canViewAllBranches(user)) { this.state.currentScreen = 'admin-dashboard'; return this.render(); }
+        content = this.renderBranchComparison(user); break;
       case 'admin-koperasi': 
         if (user.role === 'kerani') { this.state.currentScreen = 'admin-customers'; return this.render(); }
         content = this.renderAdminKoperasi(user); break;
@@ -2886,11 +3194,11 @@ const App = {
     document.getElementById('login-name')?.focus();
   },
   
-  doLogin() {
+  async doLogin() {
     const name = document.getElementById('login-name').value.trim();
     const pass = document.getElementById('login-pass').value;
     const err = document.getElementById('login-error');
-    const result = Auth.login(name, pass);
+    const result = await Auth.login(name, pass);
     if (!result.ok) {
       err.textContent = result.error;
       err.classList.add('show');
@@ -2943,6 +3251,19 @@ this.render();
           </div>
           <div style="display:flex;align-items:center;gap:10px;">
             ${(() => {
+              // Follow-up reminders due today/overdue
+              try {
+                const dueFollowUps = (App.getFollowUpsDue && Auth.current()) ? App.getFollowUpsDue(user.id) : [];
+                if (dueFollowUps.length > 0) {
+                  return `<div onclick="App.openFollowUpsList()" title="${dueFollowUps.length} follow-up(s) due" style="position:relative;cursor:pointer;padding:4px 10px;background:#FEF3C7;border:1px solid #D97706;border-radius:14px;font-size:11px;font-weight:800;color:#92400E;display:flex;align-items:center;gap:4px;">
+                    <span>📌</span>
+                    <span>${dueFollowUps.length}</span>
+                  </div>`;
+                }
+              } catch (e) {}
+              return '';
+            })()}
+            ${(() => {
               // Outbox indicator - shows when there are pending writes
               const pending = window.Cloud?.outboxCount ? window.Cloud.outboxCount() : 0;
               if (pending > 0) {
@@ -2986,7 +3307,7 @@ this.render();
         <div class="case-card-top">
           <div style="flex: 1;">
             <div class="case-customer">${c.customer_name}</div>
-            <div class="case-package" style="margin-top: 2px;">Phone: ${c.phone || '—'} · IC: ${c.ic || '—'}</div>
+            <div class="case-package" style="margin-top: 2px;">${phoneLink(c.phone, true)} · IC: ${c.ic || '—'}</div>
             <div style="font-size: 11px; color: var(--ink-2); margin-top: 4px;">
               <strong>Bersih ${fmtRM(c.gaji_bersih)} (${c.gaji_bersih_pct.toFixed(0)}%)</strong> · CS: ${cs?.name || '—'} · ${dateStr}
             </div>
@@ -3047,6 +3368,23 @@ this.render();
       <div class="info-banner">
         <strong>Note:</strong> KPI & KFI dikira pada Team Leader (${teamLeader?.name || '—'}). Anda dapat komisen untuk setiap payslip yang disbursed.
       </div>
+      
+      ${(() => {
+        // ===== FOLLOW-UP REMINDERS (for CS too) =====
+        const dueFollowUps = App.getFollowUpsDue(user.id);
+        if (dueFollowUps.length === 0) return '';
+        const today = new Date().toISOString().slice(0, 10);
+        const overdue = dueFollowUps.filter(c => c.follow_up_date < today).length;
+        return `
+          <div onclick="App.openFollowUpsList()" style="background: linear-gradient(135deg, #FEF3C7 0%, #FED7AA 100%); border: 1px solid #D97706; border-left: 4px solid #D97706; border-radius: 12px; padding: 12px 14px; margin: 12px 0; cursor: pointer; display:flex;align-items:center;gap:10px;">
+            <span style="font-size:22px;">📌</span>
+            <div style="flex:1;">
+              <div style="font-size:13px;font-weight:800;color:#92400E;">${dueFollowUps.length} Follow-Up Customer</div>
+              <div style="font-size:11px;color:#78350F;">${overdue > 0 ? `⚠ ${overdue} overdue · ` : ''}Tap untuk lihat semua →</div>
+            </div>
+          </div>
+        `;
+      })()}
       
       <div class="section-header">
         <div class="section-title">Recent Payslip</div>
@@ -3313,6 +3651,12 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
     const canDelete = Permissions.canDelete(user);  // Boss only
     const stage2Done = c.package_id !== null;
     
+    // CS can add remarks to their own cases (source_cs_id === user.id)
+    // Plus everyone with canEdit can also add remarks
+    const canAddRemark = canEdit || (isCSOnly && c.source_cs_id === user.id);
+    // CS can set follow-up reminders on their own cases too
+    const canSetFollowUp = canEdit || (isCSOnly && c.source_cs_id === user.id);
+    
     const remarksHtml = (c.remarks || []).length === 0 ? '<div style="font-size:12px; color: var(--ink-3); font-style: italic; padding: 4px;">No remarks yet.</div>' :
       (c.remarks || []).map(r => `
         <div style="background: var(--cream); border-left: 3px solid var(--accent); padding: 8px 12px; margin-bottom: 6px; border-radius: 4px;">
@@ -3323,7 +3667,7 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
     
     showModal(`
       <div class="modal-title">${c.customer_name} ${c.is_duplicate ? '<span style="background: var(--warning-bg); color: var(--warning); font-size: 10px; padding: 3px 8px; border-radius: 8px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 800; vertical-align: middle;">Duplicate</span>' : ''}</div>
-      <div class="modal-sub">IC: ${c.ic || '—'} · Phone: ${c.phone || '—'}</div>
+      <div class="modal-sub">IC: ${c.ic || '—'} · ${phoneLink(c.phone, true)}</div>
       ${c.is_duplicate ? `
         <div class="info-banner" style="background: #FFF0E6; border-left-color: #E67E22; color: #8B4513; margin-bottom: 12px;">
           <strong>This is a duplicate.</strong> Customer was first keyed by CS <strong>${DB.user(c.original_keyer)?.name || c.original_keyer}</strong>. This case is recorded but <strong>does not count</strong> toward CS payslip tier.
@@ -3334,7 +3678,7 @@ if (isLeader && (this.state.tabState.cases || 'mine') === 'team') {
       <div style="background: var(--cream-2); border-radius: 12px; padding: 14px; margin: 14px 0; border: 1px solid var(--border-2);">
         <div style="font-size: 10px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px;">Stage 1 · Payslip Info <span class="stage-pill s1">CS: ${csUser?.name || c.source_cs_id}</span></div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px;">
-          <div><span style="color: var(--ink-3);">Phone:</span> <strong>${c.phone || '—'}</strong></div>
+          <div><span style="color: var(--ink-3);">Phone:</span> ${phoneLink(c.phone, false)}</div>
           <div><span style="color: var(--ink-3);">Date:</span> <strong>${new Date(c.date_payslip).toLocaleDateString('en-MY')}</strong></div>
           <div><span style="color: var(--ink-3);">Pendapatan:</span> <strong>RM ${Number(c.jumlah_pendapatan).toFixed(2)}</strong></div>
           <div><span style="color: var(--ink-3);">Potongan:</span> <strong>RM ${Number(c.jumlah_potongan).toFixed(2)}</strong></div>
@@ -3403,10 +3747,52 @@ ${isAdminLike ? `
         </div>
       `}
       
+      ${(() => {
+        // ===== FOLLOW-UP REMINDER SECTION =====
+        const today = new Date().toISOString().slice(0, 10);
+        const fuDate = c.follow_up_date || '';
+        const fuNote = c.follow_up_note || '';
+        const hasReminder = !!fuDate;
+        const isDue = hasReminder && fuDate <= today;
+        const daysAway = hasReminder ? Math.ceil((new Date(fuDate) - new Date(today)) / (1000 * 60 * 60 * 24)) : 0;
+        const dueText = isDue 
+          ? (fuDate === today ? 'TODAY' : `OVERDUE ${Math.abs(daysAway)} days`) 
+          : `${daysAway} days`;
+        const dueColor = isDue 
+          ? (fuDate === today ? '#D97706' : '#DC2626')
+          : '#0891B2';
+        const bgColor = isDue ? '#FEF3C7' : 'rgba(8,145,178,0.05)';
+        
+        return `
+          <div style="background: ${bgColor}; border-radius: 12px; padding: 14px; margin: 12px 0; border: 1px solid ${hasReminder ? dueColor : 'var(--border-2)'};">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <div style="font-size: 11px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em;">📌 Follow-Up Reminder</div>
+              ${hasReminder ? `<span style="background:${dueColor};color:white;padding:2px 8px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.06em;">${dueText}</span>` : ''}
+            </div>
+            ${hasReminder ? `
+              <div style="font-size: 13px; color: var(--ink); margin-bottom: 8px;">
+                <strong>${new Date(fuDate).toLocaleDateString('en-MY', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })}</strong>
+                ${fuNote ? `<div style="font-size:12px;color:var(--ink-2);margin-top:4px;font-style:italic;">"${fuNote}"</div>` : ''}
+              </div>
+            ` : `
+              <div style="font-size:12px;color:var(--ink-3);margin-bottom:8px;">Tiada reminder. Set tarikh untuk follow up customer ini.</div>
+            `}
+            ${canSetFollowUp ? `
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button class="btn-secondary" style="flex:1;min-width:120px;font-size:11px;padding:8px 10px;" onclick="App.openSetFollowUp('${c.id}')">
+                  ${hasReminder ? '✏️ Edit Reminder' : '+ Set Reminder'}
+                </button>
+                ${hasReminder ? `<button class="btn-secondary" style="font-size:11px;padding:8px 10px;color:#DC2626;border-color:rgba(220,38,38,0.3);" onclick="App.clearFollowUp('${c.id}')">✕ Clear</button>` : ''}
+              </div>
+            ` : ''}
+          </div>
+        `;
+      })()}
+      
       <div style="margin: 14px 0 8px;">
         <div style="font-size: 11px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px;">Follow-up Remarks (${(c.remarks || []).length})</div>
         ${remarksHtml}
-        ${canEdit ? `
+        ${canAddRemark ? `
           <div style="margin-top: 8px;">
             <textarea id="new-remark" rows="2" placeholder="Tambah remark / catatan..." style="width: 100%; background: var(--cream-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 10px; font-family: inherit; font-size: 13px; outline: none; resize: vertical;"></textarea>
             <button class="btn-secondary" style="margin-top: 6px;" onclick="App.addRemark('${c.id}')">+ Add Remark</button>
@@ -3577,22 +3963,11 @@ ${isAdminLike ? `
     toast('Customer deleted · sending notifications...');
     this.render();
     
-// Broadcast notification (async) - notify HQ + same branch: kerani, manager, solo/leader (case owner only)
+    // Broadcast notification (async) - uses unified recipient helper
     try {
-      const caseBranchId = c.branch_id || DB.user(c.leader_id || c.source_cs_id)?.branch_id;
-      const caseLeader = DB.user(c.leader_id);
-      const allUsers = DB.users().filter(u => !u.inactive);
-      const recipients = allUsers.filter(u => {
-        if (u.id === user.id) return false; // jangan notif diri sendiri
-        if (u.role === 'hq') return true; // HQ semua
-        if (u.branch_id !== caseBranchId) return false; // lain branch, skip
-        if (u.role === 'manager') return true; // manager same branch
-        if (u.role === 'kerani') return true; // admin same branch
-if (u.role === 'solo' && u.id === c.leader_id) return true; // solo case owner
-if (u.role === 'leader' && u.id === c.leader_id) return true; // team leader case owner
-if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/solos, skip
-        return false;
-      });
+      const recipientIds = Logic.getNotifyRecipientsForCase(user.id, c);
+      const recipients = recipientIds.map(id => DB.user(id)).filter(Boolean);
+      
       const results = await Promise.all(
         recipients.map(async u => {
           const ok = await DB.addNotification(u.id, notifData);
@@ -3750,6 +4125,136 @@ if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/sol
     toast('Remark added');
     hideModal();
     this.viewCase(caseId);  // Re-open with new remark
+  },
+  
+  // ============ FOLLOW-UP REMINDER ============
+  openSetFollowUp(caseId) {
+    const c = DB.caseById(caseId);
+    if (!c) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+    const in3 = new Date(); in3.setDate(in3.getDate() + 3);
+    const in7 = new Date(); in7.setDate(in7.getDate() + 7);
+    const in14 = new Date(); in14.setDate(in14.getDate() + 14);
+    
+    const currentDate = c.follow_up_date || tomorrowStr;
+    const currentNote = c.follow_up_note || '';
+    
+    showModal(`
+      <div class="modal-title">📌 Set Follow-Up Reminder</div>
+      <div class="modal-sub">${c.customer_name}</div>
+      
+      <div class="form-group">
+        <label>Tarikh Follow-Up</label>
+        <input type="date" id="fu-date" value="${currentDate}" min="${today}" 
+               style="width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--border-2); font-family: inherit; font-size: 14px;">
+      </div>
+      
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">
+        <button class="btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="document.getElementById('fu-date').value='${tomorrowStr}'">Tomorrow</button>
+        <button class="btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="document.getElementById('fu-date').value='${in3.toISOString().slice(0,10)}'">+3 Days</button>
+        <button class="btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="document.getElementById('fu-date').value='${in7.toISOString().slice(0,10)}'">+1 Week</button>
+        <button class="btn-secondary" style="font-size:11px;padding:6px 10px;" onclick="document.getElementById('fu-date').value='${in14.toISOString().slice(0,10)}'">+2 Weeks</button>
+      </div>
+      
+      <div class="form-group">
+        <label>Nota (optional)</label>
+        <textarea id="fu-note" rows="3" placeholder="Contoh: Call balik confirm gaji bulan ni..." 
+                  style="width: 100%; background: var(--cream-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 10px; font-family: inherit; font-size: 13px; outline: none; resize: vertical;">${currentNote}</textarea>
+      </div>
+      
+      <button class="submit-btn" onclick="App.saveFollowUp('${caseId}')">💾 Simpan Reminder</button>
+      <button class="btn-secondary" onclick="App.viewCase('${caseId}')">Cancel</button>
+    `);
+  },
+  
+  saveFollowUp(caseId) {
+    const date = document.getElementById('fu-date').value;
+    const note = document.getElementById('fu-note').value.trim();
+    if (!date) { toast('Sila pilih tarikh'); return; }
+    
+    DB.updateCase(caseId, { 
+      follow_up_date: date, 
+      follow_up_note: note 
+    });
+    toast(`📌 Reminder set: ${new Date(date).toLocaleDateString('en-MY', { day: '2-digit', month: 'short' })}`);
+    this.viewCase(caseId);
+  },
+  
+  clearFollowUp(caseId) {
+    if (!confirm('Padam follow-up reminder?')) return;
+    DB.updateCase(caseId, { 
+      follow_up_date: null, 
+      follow_up_note: null 
+    });
+    toast('Reminder cleared');
+    this.viewCase(caseId);
+  },
+  
+  // Get cases with follow-ups due today or overdue (used in dashboard widgets)
+  getFollowUpsDue(userId) {
+    const today = new Date().toISOString().slice(0, 10);
+    const user = DB.user(userId);
+    if (!user) return [];
+    
+    let cases = DB.cases().filter(c => c.follow_up_date && c.follow_up_date <= today);
+    
+    // Filter by user's scope
+    if (user.role === 'cs') {
+      cases = cases.filter(c => c.source_cs_id === user.id);
+    } else if (user.role === 'leader' || user.role === 'solo') {
+      cases = cases.filter(c => 
+        c.leader_id === user.id || 
+        c.source_cs_id === user.id ||
+        (DB.user(c.source_cs_id)?.leader_id === user.id)
+      );
+    } else if (['admin', 'manager', 'kerani'].includes(user.role)) {
+      cases = cases.filter(c => c.branch_id === user.branch_id);
+    }
+    // hq sees all
+    
+    return cases.sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date));
+  },
+  
+  openFollowUpsList() {
+    const user = Auth.current();
+    const cases = this.getFollowUpsDue(user.id);
+    const today = new Date().toISOString().slice(0, 10);
+    
+    const renderItem = (c) => {
+      const overdue = c.follow_up_date < today;
+      const isToday = c.follow_up_date === today;
+      const cs = DB.user(c.source_cs_id);
+      const tagColor = overdue ? '#DC2626' : isToday ? '#D97706' : '#0891B2';
+      const tagText = overdue ? `OVERDUE` : isToday ? `TODAY` : 'UPCOMING';
+      
+      return `
+        <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;" onclick="hideModal(); App.viewCase('${c.id}')">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;">
+            <strong style="font-size:13px;color:var(--ink);">${c.customer_name}</strong>
+            <span style="background:${tagColor};color:white;padding:2px 8px;border-radius:8px;font-size:9px;font-weight:800;letter-spacing:0.05em;">${tagText}</span>
+          </div>
+          <div style="font-size:11px;color:var(--ink-3);line-height:1.5;">
+            <div>📅 ${new Date(c.follow_up_date).toLocaleDateString('en-MY', { weekday: 'short', day: '2-digit', month: 'short' })}</div>
+            <div>📞 ${phoneLink(c.phone, true)} · CS: ${cs?.name || '—'}</div>
+            ${c.follow_up_note ? `<div style="margin-top:4px;font-style:italic;color:var(--ink-2);">"${c.follow_up_note}"</div>` : ''}
+          </div>
+        </div>
+      `;
+    };
+    
+    showModal(`
+      <div class="modal-title">📌 Follow-Ups Due</div>
+      <div style="font-size:12px;color:var(--ink-3);margin-bottom:12px;">${cases.length} customer(s) need follow-up today or earlier</div>
+      <div style="max-height:60vh;overflow-y:auto;">
+        ${cases.length === 0 
+          ? `<div style="text-align:center;padding:32px 0;color:var(--ink-3);font-size:14px;">✅ Semua follow-up sudah selesai!</div>` 
+          : cases.map(renderItem).join('')}
+      </div>
+      <button class="btn-secondary" onclick="hideModal()" style="margin-top:10px;">Tutup</button>
+    `);
   },
   
   openProcessCase(caseId) {
@@ -4384,6 +4889,49 @@ if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/sol
         </div>
       </div>
       
+      ${(() => {
+        // ===== FOLLOW-UP REMINDERS (Today + Overdue) =====
+        const dueFollowUps = App.getFollowUpsDue(user.id);
+        if (dueFollowUps.length === 0) return '';
+        
+        const today = new Date().toISOString().slice(0, 10);
+        const overdue = dueFollowUps.filter(c => c.follow_up_date < today);
+        const todayCases = dueFollowUps.filter(c => c.follow_up_date === today);
+        const preview = dueFollowUps.slice(0, 3);
+        
+        return `
+          <div style="background: linear-gradient(135deg, #FEF3C7 0%, #FED7AA 100%); border: 1px solid #D97706; border-left: 4px solid #D97706; border-radius: 12px; padding: 14px; margin: 14px 16px; cursor: pointer;" onclick="App.openFollowUpsList()">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:8px;">
+                <span style="font-size:20px;">📌</span>
+                <div>
+                  <div style="font-size:13px;font-weight:800;color:#92400E;">Follow-Up Hari Ini</div>
+                  <div style="font-size:11px;color:#78350F;">${todayCases.length} today${overdue.length > 0 ? ` · ${overdue.length} OVERDUE` : ''}</div>
+                </div>
+              </div>
+              <div style="background:white;color:#D97706;padding:6px 12px;border-radius:20px;font-weight:800;font-size:18px;border:2px solid #D97706;">${dueFollowUps.length}</div>
+            </div>
+            
+            <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px;">
+              ${preview.map(c => {
+                const isOverdue = c.follow_up_date < today;
+                const cs = DB.user(c.source_cs_id);
+                return `
+                  <div style="background:rgba(255,255,255,0.7);border-radius:8px;padding:8px 10px;font-size:11px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                      <strong style="color:#78350F;">${c.customer_name}</strong>
+                      ${isOverdue ? `<span style="background:#DC2626;color:white;padding:1px 6px;border-radius:6px;font-size:9px;font-weight:800;">OVERDUE</span>` : `<span style="background:#D97706;color:white;padding:1px 6px;border-radius:6px;font-size:9px;font-weight:800;">TODAY</span>`}
+                    </div>
+                    <div style="color:#92400E;font-size:10px;margin-top:2px;">📞 ${phoneLink(c.phone, true)} · CS: ${cs?.name || '—'}${c.follow_up_note ? ` · "${c.follow_up_note.substring(0, 30)}${c.follow_up_note.length > 30 ? '...' : ''}"` : ''}</div>
+                  </div>
+                `;
+              }).join('')}
+              ${dueFollowUps.length > 3 ? `<div style="text-align:center;font-size:11px;color:#92400E;font-weight:700;padding-top:4px;">+ ${dueFollowUps.length - 3} more · tap to view all →</div>` : ''}
+            </div>
+          </div>
+        `;
+      })()}
+      
       ${newCases.length > 0 ? `
         <div class="info-banner" style="background: var(--accent); border-left-color: var(--accent-dark); color: var(--primary-dark);">
           <strong>${stats.newCount} new payslip${stats.newCount > 1 ? 's' : ''} awaiting stage 3.</strong> Tap below → langsung buka form untuk isi Pakej / Loan / Tenor.
@@ -4953,8 +5501,30 @@ if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/sol
   openNotifications() {
     const user = Auth.current();
     if (!user) return;
-    const notifs = DB.notifications(user.id);
+    const allNotifs = DB.notifications(user.id);
     DB.markNotificationsRead(user.id);
+    
+    // Filter by type if set
+    const activeFilter = this.state.notifFilter || 'all';
+    const notifs = activeFilter === 'all' 
+      ? allNotifs 
+      : allNotifs.filter(n => n.type === activeFilter);
+    
+    // Count notifs by type (for filter chips)
+    const typeCounts = { all: allNotifs.length };
+    allNotifs.forEach(n => {
+      const t = n.type || 'other';
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    
+    // Filter chip definitions
+    const filterChips = [
+      { key: 'all',                        label: 'All',      icon: '📋' },
+      { key: 'customer_deleted',           label: 'Deleted',  icon: '🗑️' },
+      { key: 'customer_status_changed',    label: 'Status',   icon: '🔄' },
+      { key: 'customer_updated',           label: 'Updated',  icon: '✏️' },
+      { key: 'customer_new',               label: 'New',      icon: '📥' },
+    ].filter(f => f.key === 'all' || typeCounts[f.key] > 0);  // hide chips with 0 items
     
     const renderOneNotif = (n) => {
       const date = new Date(n.ts).toLocaleString('en-MY', { 
@@ -4987,7 +5557,81 @@ if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/sol
               ${n.loan_amount ? `<div><strong>Loan:</strong> RM ${(n.loan_amount).toLocaleString()}</div>` : ''}
               ${n.source_cs_name ? `<div><strong>Source CS:</strong> ${n.source_cs_name}</div>` : ''}
               ${n.leader_name ? `<div><strong>Leader:</strong> ${n.leader_name}</div>` : ''}
+              ${n.branch_name ? `<div><strong>Branch:</strong> ${n.branch_name}</div>` : ''}
             </div>
+          </div>
+        `;
+      }
+      
+      // Status change - medium severity, blue tint
+      if (n.type === 'customer_status_changed') {
+        return `
+          <div style="background:rgba(59,130,246,0.05);border:1px solid rgba(59,130,246,0.2);border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;" onclick="hideModal(); App.viewCase('${n.case_id}')">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">
+              <div style="font-size:13px;font-weight:800;color:#1E40AF;">🔄 Status Changed</div>
+              <div style="font-size:9px;color:var(--ink-3);white-space:nowrap;">${date}</div>
+            </div>
+            <div style="font-size:12px;color:var(--ink);margin-bottom:6px;line-height:1.4;">
+              <strong>${n.actor_name}</strong> 
+              <span style="background:var(--cream-3);padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;text-transform:uppercase;color:var(--ink-2);">${ROLE_LABELS[n.actor_role] || n.actor_role}</span>
+              changed status:
+            </div>
+            <div style="background:var(--cream);border-radius:8px;padding:10px;font-size:11px;line-height:1.6;">
+              <div><strong>Customer:</strong> ${n.customer_name || '—'}</div>
+              <div><strong>${n.old_status ? STATUS_LABELS[n.old_status] || n.old_status : '—'}</strong> → <strong style="color:#1E40AF;">${STATUS_LABELS[n.new_status] || n.new_status}</strong></div>
+              ${n.source_cs_name ? `<div><strong>Source CS:</strong> ${n.source_cs_name}</div>` : ''}
+              ${n.leader_name ? `<div><strong>Leader:</strong> ${n.leader_name}</div>` : ''}
+              ${n.branch_name ? `<div><strong>Branch:</strong> ${n.branch_name}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }
+      
+      // Customer updated (info edit) - low severity, neutral
+      if (n.type === 'customer_updated') {
+        return `
+          <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;" onclick="hideModal(); App.viewCase('${n.case_id}')">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">
+              <div style="font-size:13px;font-weight:800;color:var(--ink);">✏️ Customer Updated</div>
+              <div style="font-size:9px;color:var(--ink-3);white-space:nowrap;">${date}</div>
+            </div>
+            <div style="font-size:12px;color:var(--ink);margin-bottom:6px;line-height:1.4;">
+              <strong>${n.actor_name}</strong> 
+              <span style="background:var(--cream-3);padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;text-transform:uppercase;color:var(--ink-2);">${ROLE_LABELS[n.actor_role] || n.actor_role}</span>
+              updated:
+            </div>
+            <div style="background:var(--cream);border-radius:8px;padding:10px;font-size:11px;line-height:1.6;">
+              <div><strong>Customer:</strong> ${n.customer_name || '—'}</div>
+              ${n.changes_summary ? `<div><strong>Changed:</strong> ${n.changes_summary}</div>` : ''}
+              <div><strong>Status:</strong> <span style="text-transform:capitalize;">${(n.case_status || '').replace('_', ' ')}</span></div>
+              ${n.source_cs_name ? `<div><strong>Source CS:</strong> ${n.source_cs_name}</div>` : ''}
+              ${n.leader_name ? `<div><strong>Leader:</strong> ${n.leader_name}</div>` : ''}
+              ${n.branch_name ? `<div><strong>Branch:</strong> ${n.branch_name}</div>` : ''}
+            </div>
+          </div>
+        `;
+      }
+      
+      // New customer (CS submitted payslip to TL)
+      if (n.type === 'customer_new') {
+        return `
+          <div style="background:rgba(34,197,94,0.05);border:1px solid rgba(34,197,94,0.2);border-radius:10px;padding:12px;margin-bottom:8px;cursor:pointer;" onclick="hideModal(); App.viewCase('${n.case_id}')">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">
+              <div style="font-size:13px;font-weight:800;color:#166534;">📥 New Payslip from CS</div>
+              <div style="font-size:9px;color:var(--ink-3);white-space:nowrap;">${date}</div>
+            </div>
+            <div style="font-size:12px;color:var(--ink);margin-bottom:6px;line-height:1.4;">
+              <strong>${n.actor_name}</strong> 
+              <span style="background:var(--cream-3);padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700;text-transform:uppercase;color:var(--ink-2);">CS</span>
+              submitted a new payslip:
+            </div>
+            <div style="background:var(--cream);border-radius:8px;padding:10px;font-size:11px;line-height:1.6;">
+              <div><strong>Customer:</strong> ${n.customer_name || '—'}${n.is_duplicate ? ' <span style="background:#FEE;color:#C00;padding:1px 6px;border-radius:6px;font-size:9px;">DUPLICATE</span>' : ''}</div>
+              ${n.customer_ic ? `<div><strong>IC:</strong> ${n.customer_ic}</div>` : ''}
+              ${n.customer_phone ? `<div><strong>Phone:</strong> ${n.customer_phone}</div>` : ''}
+              ${n.branch_name ? `<div><strong>Branch:</strong> ${n.branch_name}</div>` : ''}
+            </div>
+            <div style="margin-top:6px;font-size:11px;color:#166534;font-weight:700;">→ Tap to view and start working</div>
           </div>
         `;
       }
@@ -5007,17 +5651,93 @@ if (u.role === 'leader' || u.role === 'solo') return false; // other leaders/sol
     
     showModal(`
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-        <div class="modal-title" style="margin:0;">🔔 Notifikasi ${notifs.length > 0 ? `<span style="font-size:12px;color:var(--ink-3);font-weight:500;">(${notifs.length})</span>` : ''}</div>
+        <div class="modal-title" style="margin:0;">🔔 Notifikasi ${allNotifs.length > 0 ? `<span style="font-size:12px;color:var(--ink-3);font-weight:500;">(${allNotifs.length})</span>` : ''}</div>
+        <button onclick="App.toggleNotifSound()" title="${App.isNotifSoundOn() ? 'Sound ON · click to mute' : 'Sound OFF · click to enable'}" style="background:transparent;border:1px solid var(--border);padding:6px 10px;border-radius:6px;cursor:pointer;font-size:14px;">${App.isNotifSoundOn() ? '🔊' : '🔇'}</button>
       </div>
+      
+      ${filterChips.length > 1 ? `
+        <div class="filter-bar" style="margin-bottom:10px;padding:0;">
+          ${filterChips.map(f => `
+            <div class="filter-chip ${activeFilter === f.key ? 'active' : ''}" 
+                 onclick="App.setNotifFilter('${f.key}')" 
+                 style="font-size:11px;">
+              ${f.icon} ${f.label} <span style="opacity:0.7;font-size:10px;">${typeCounts[f.key] || 0}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+      
       <div style="max-height:60vh;overflow-y:auto;">
       ${notifs.length === 0 
-        ? `<div style="text-align:center;padding:32px 0;color:var(--ink-3);font-size:14px;">📭 Tiada notifikasi baru</div>` 
+        ? `<div style="text-align:center;padding:32px 0;color:var(--ink-3);font-size:14px;">📭 ${activeFilter === 'all' ? 'Tiada notifikasi baru' : 'Tiada notifikasi dengan filter ini'}</div>` 
         : notifs.map(renderOneNotif).join('')
       }
       </div>
       <button class="btn-secondary" onclick="hideModal(); App.render();" style="margin-top:12px;width:100%;">Tutup</button>
     `);
   },
+  
+  setNotifFilter(filter) {
+    this.state.notifFilter = filter;
+    this.openNotifications();
+  },
+  
+  // ============ NOTIFICATION SOUND ============
+  // Plays a subtle "ding" sound when a new important notification arrives.
+  // Uses Web Audio API (no external file needed).
+  // User can toggle on/off via 🔊/🔇 button in notification modal.
+  isNotifSoundOn() {
+    return localStorage.getItem('awara_notif_sound') !== '0';  // default ON
+  },
+  
+  toggleNotifSound() {
+    const on = this.isNotifSoundOn();
+    localStorage.setItem('awara_notif_sound', on ? '0' : '1');
+    toast(on ? '🔇 Notification sound OFF' : '🔊 Notification sound ON');
+    // Test play sound if toggled on
+    if (!on) {
+      try { this.playNotifSound('medium'); } catch {}
+    }
+    this.openNotifications();
+  },
+  
+  playNotifSound(severity) {
+    if (!this.isNotifSoundOn()) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = this._audioCtx || (this._audioCtx = new AudioCtx());
+      
+      // Different tone per severity
+      const config = {
+        high:   { freq: 880, duration: 0.25 },   // High urgent ding
+        medium: { freq: 660, duration: 0.18 },   // Medium ding
+        low:    { freq: 440, duration: 0.12 }    // Low subtle
+      }[severity] || { freq: 550, duration: 0.15 };
+      
+      // Two-tone ding: main note + harmonic
+      const playTone = (freq, when, dur, vol = 0.15) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0, when);
+        gain.gain.linearRampToValueAtTime(vol, when + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, when + dur);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(when);
+        osc.stop(when + dur);
+      };
+      
+      const t = ctx.currentTime;
+      playTone(config.freq, t, config.duration);
+      playTone(config.freq * 1.5, t + 0.05, config.duration * 0.7, 0.08);
+    } catch (e) {
+      // Audio might fail on first user interaction or in some browsers - silent fail
+      Logger.debug('playNotifSound failed:', e.message);
+    }
+  },
+  
 
   setRankingBranch(branchId) {
     this.state.rankingBranch = branchId;
@@ -5589,6 +6309,53 @@ if (!Permissions.canViewAllBranches(user)) {
         </div>
       ` : ''}
       
+      ${user.role === 'kerani' ? (() => {
+        // ===== KERANI SUMMARY STRIP =====
+        // Quick stats for Kerani's branch: New today, Pending, Need Processing
+        const today = new Date().toISOString().slice(0, 10);
+        const branchCases = DB.cases().filter(c => c.branch_id === user.branch_id);
+        const newToday = branchCases.filter(c => 
+          (c.date_payslip || '').startsWith(today) || 
+          (c.created_at && new Date(c.created_at).toISOString().slice(0,10) === today)
+        ).length;
+        const pending = branchCases.filter(c => c.status === 'pending').length;
+        const onHold = branchCases.filter(c => c.status === 'on_hold').length;
+        const needProcessing = branchCases.filter(c => 
+          ['submitted', 'approved'].includes(c.status)
+        ).length;
+        const totalActive = branchCases.filter(c => 
+          !['disbursed', 'rejected'].includes(c.status)
+        ).length;
+        
+        return `
+          <div style="padding: 0 20px 14px;">
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
+              <div onclick="App.setFilter('adminCust','new')" style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:10px;padding:10px 6px;text-align:center;cursor:pointer;transition:all 0.15s;" onmouseover="this.style.background='var(--cream-3)'" onmouseout="this.style.background='var(--cream-2)'">
+                <div style="font-size:9px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.06em;">📥 New Today</div>
+                <div style="font-size:20px;font-weight:800;color:#0891B2;margin-top:2px;">${newToday}</div>
+              </div>
+              <div onclick="App.setFilter('adminCust','pending')" style="background:${pending > 0 ? 'rgba(244,114,182,0.1)' : 'var(--cream-2)'};border:1px solid ${pending > 0 ? 'rgba(244,114,182,0.4)' : 'var(--border-2)'};border-radius:10px;padding:10px 6px;text-align:center;cursor:pointer;transition:all 0.15s;">
+                <div style="font-size:9px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.06em;">⏳ Pending</div>
+                <div style="font-size:20px;font-weight:800;color:${pending > 0 ? '#BE185D' : 'var(--ink-3)'};margin-top:2px;">${pending}</div>
+              </div>
+              <div onclick="App.setFilter('adminCust','on_hold')" style="background:${onHold > 0 ? 'rgba(180,83,9,0.1)' : 'var(--cream-2)'};border:1px solid ${onHold > 0 ? 'rgba(180,83,9,0.3)' : 'var(--border-2)'};border-radius:10px;padding:10px 6px;text-align:center;cursor:pointer;transition:all 0.15s;">
+                <div style="font-size:9px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.06em;">🚧 On Hold</div>
+                <div style="font-size:20px;font-weight:800;color:${onHold > 0 ? '#92400E' : 'var(--ink-3)'};margin-top:2px;">${onHold}</div>
+              </div>
+              <div onclick="App.setFilter('adminCust','all')" style="background:var(--primary);color:white;border-radius:10px;padding:10px 6px;text-align:center;cursor:pointer;border:1px solid var(--primary-dark);">
+                <div style="font-size:9px;opacity:0.85;font-weight:800;text-transform:uppercase;letter-spacing:0.06em;">📋 Active</div>
+                <div style="font-size:20px;font-weight:800;margin-top:2px;">${totalActive}</div>
+              </div>
+            </div>
+            ${needProcessing > 0 ? `
+              <div style="margin-top:8px;padding:8px 10px;background:var(--accent-glow);border-left:3px solid var(--accent);border-radius:6px;font-size:11px;color:var(--ink);">
+                ⚡ <strong>${needProcessing}</strong> cases in submit/approve stage — review jika perlu ikut up
+              </div>
+            ` : ''}
+          </div>
+        `;
+      })() : ''}
+      
       <div class="search-bar">
         <input class="search-input" type="text" placeholder="Search by Name, IC, or Phone..." 
                value="${this.state.searchText || ''}" 
@@ -5635,10 +6402,19 @@ if (!Permissions.canViewAllBranches(user)) {
         ).join('')}
       </div>
       
-      <div style="padding: 10px 20px; font-size: 11px; color: var(--ink-3); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; display: flex; justify-content: space-between;">
+      <div style="padding: 10px 20px; font-size: 11px; color: var(--ink-3); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; display: flex; justify-content: space-between; align-items: center;">
         <span>${cases.length} cases shown</span>
-        <span style="color: var(--accent-deep);">${totalAll} total in DB</span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          ${Permissions.isAdminLevel(user) ? `
+            <button onclick="App.toggleBulkMode()" style="background:${this.state.bulkMode ? 'var(--primary)' : 'var(--cream-2)'};color:${this.state.bulkMode ? 'white' : 'var(--ink-2)'};border:1px solid var(--border);padding:4px 10px;border-radius:6px;font-family:inherit;font-weight:700;font-size:10px;cursor:pointer;text-transform:uppercase;letter-spacing:0.08em;">
+              ${this.state.bulkMode ? '✕ Cancel' : '☑ Bulk'}
+            </button>
+          ` : ''}
+          <span style="color: var(--accent-deep);">${totalAll} total</span>
+        </div>
       </div>
+      
+      ${this.state.bulkMode ? this.renderBulkActionBar(cases, user) : ''}
       
       <div class="case-list">
         ${cases.length === 0 ? this.emptyState('No customers match these filters.') :
@@ -5687,11 +6463,19 @@ if (!Permissions.canViewAllBranches(user)) {
     const dateStr = new Date(c.date_payslip).toLocaleDateString('en-MY', { day: 'numeric', month: 'short' });
     
     return `
-      <div class="case-card ${c.status === 'disbursed' ? 'closed' : ''} ${c.status === 'rejected' ? 'rejected' : ''}" onclick="App.viewCase('${c.id}')" ${c.is_duplicate ? 'style="border-left: 3px solid var(--warning); opacity: 0.85;"' : ''}>
+      <div class="case-card ${c.status === 'disbursed' ? 'closed' : ''} ${c.status === 'rejected' ? 'rejected' : ''}" onclick="${this.state.bulkMode ? `App.toggleBulkSelect('${c.id}')` : `App.viewCase('${c.id}')`}" ${c.is_duplicate ? 'style="border-left: 3px solid var(--warning); opacity: 0.85;"' : ''}>
         <div class="case-card-top">
+          ${this.state.bulkMode ? `
+            <div style="flex:0 0 28px;display:flex;align-items:center;">
+              <input type="checkbox" 
+                ${(this.state.bulkSelected || []).includes(c.id) ? 'checked' : ''}
+                onclick="event.stopPropagation(); App.toggleBulkSelect('${c.id}')"
+                style="width:20px;height:20px;cursor:pointer;accent-color:var(--primary);">
+            </div>
+          ` : ''}
           <div style="flex: 1;">
             <div class="case-customer">${c.customer_name} ${c.is_duplicate ? '<span style="background: var(--warning-bg); color: var(--warning); font-size: 9px; padding: 2px 6px; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 800; vertical-align: middle; margin-left: 4px;">DUP</span>' : ''}</div>
-            <div class="case-package" style="margin-top: 2px;">${c.ic || '—'} · ${c.phone || '—'}</div>
+            <div class="case-package" style="margin-top: 2px;">${c.ic || '—'} · ${phoneLink(c.phone, true)}</div>
             <div style="font-size: 11px; color: var(--ink-3); margin-top: 3px;">
               CS: <strong style="color: var(--ink-2);">${cs?.name || '—'}</strong> · T.<strong style="color: var(--ink-2);">${leader?.name || '—'}</strong>${branch ? ` · B.<strong style="color: var(--ink-2);">${branch.name}</strong>` : ''}
             </div>
@@ -5944,6 +6728,7 @@ if (currentUser.role === 'hq' && u.role === 'admin') {
       
       <button class="submit-btn" onclick="App.saveUser('${userId}')">Save Changes</button>
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-secondary" style="margin-top: 8px; color: #0891B2; border-color: rgba(8,145,178,0.3);" onclick="App.viewStaffActivity('${userId}')">📊 View Activity & Performance</button>
       ${(() => {
         const attempts = DB.loginAttempts(userId);
         const isLocked = attempts.lockedAt;
@@ -5959,7 +6744,7 @@ if (currentUser.role === 'hq' && u.role === 'admin') {
     `);
   },
   
-  saveUser(userId) {
+  async saveUser(userId) {
     const name = document.getElementById('eu-name').value.trim();
     const role = document.querySelector('#eu-role .case-type-pill.active').dataset.val;
     const leaderId = document.getElementById('eu-leader').value;
@@ -5995,7 +6780,7 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
     const updates = { name, role };
     if (branchId) updates.branch_id = branchId;
     updates.leader_id = role === 'cs' ? leaderId : null;
-    if (pass) updates.password = pass;
+    if (pass) updates.password = await Hash.sha256(pass);
     
     DB.updateUser(userId, updates);  // updateUser already syncs to Cloud
     
@@ -6030,6 +6815,9 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
   },
   
   deleteUser(userId) {
+    const me = Auth.current();
+    if (!Permissions.canDelete(me)) { toast('No permission to delete staff'); return; }
+    if (userId === me.id) { toast('Tidak boleh delete diri sendiri'); return; }
     if (!confirm('Delete this staff? (Cases linked to them will keep their name)')) return;
     DB.deleteUserById(userId);
     hideModal();
@@ -6180,7 +6968,7 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
     }
   },
   
-  createUser() {
+  async createUser() {
     try {
       const nameEl = document.getElementById('nu-name');
       const idEl = document.getElementById('nu-id');
@@ -6227,11 +7015,12 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
       }
       
       // Save new user via centralized method (writes localStorage + Firestore atomically)
+      const hashedPass = await Hash.sha256(pass);
       const newUser = { 
         id, name, role,
         branch_id: branchId,
         leader_id: role === 'cs' ? leaderId : null, 
-        password: pass,
+        password: hashedPass,
         created_at: Date.now()
       };
       const saved = DB.addUser(newUser);
@@ -6251,6 +7040,185 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
   },
   
   // ============ ADMIN: WEEKLY REPORT ============
+  // ============ BRANCH COMPARISON (HQ/Boss only) ============
+  // Side-by-side comparison of all branches' performance this month
+  renderBranchComparison(user) {
+    const ym = this.state.bcMonth || new Date().toISOString().slice(0, 7);
+    const branches = DB.branches().filter(b => b.id !== 'hq');
+    const allUsers = DB.users().filter(u => !u.inactive);
+    const allCases = DB.cases();
+    
+    // Calculate stats per branch
+    const stats = branches.map(b => {
+      const branchCases = allCases.filter(c => c.branch_id === b.id);
+      const monthCases = branchCases.filter(c => 
+        (c.date_payslip && c.date_payslip.startsWith(ym)) ||
+        (c.date_submitted && c.date_submitted.startsWith(ym)) ||
+        (c.date_disbursed && c.date_disbursed.startsWith(ym))
+      );
+      
+      // Submitted (KPI) - excludes rejected per business rule
+      const submitted = branchCases.filter(c => 
+        c.date_submitted?.startsWith(ym) && c.status !== 'rejected'
+      ).length;
+      
+      // Approved
+      const approved = branchCases.filter(c => 
+        c.date_approved?.startsWith(ym)
+      ).length;
+      
+      // Disbursed
+      const disbursed = branchCases.filter(c => c.date_disbursed?.startsWith(ym));
+      const disbursedAmount = disbursed.reduce((s, c) => s + (c.disbursed_amount || c.disburse_amount || 0), 0);
+      
+      // Staff counts
+      const branchStaff = allUsers.filter(u => u.branch_id === b.id);
+      const csCount = branchStaff.filter(u => u.role === 'cs').length;
+      const tlCount = branchStaff.filter(u => u.role === 'leader' || u.role === 'solo').length;
+      const mgrCount = branchStaff.filter(u => u.role === 'manager').length;
+      
+      // New customers (payslip this month)
+      const newCustomers = branchCases.filter(c => 
+        c.date_payslip?.startsWith(ym)
+      ).length;
+      
+      // Conversion: disbursed / new customers
+      const conversion = newCustomers > 0 ? (disbursed.length / newCustomers * 100) : 0;
+      
+      // Top performer (highest disbursed amount)
+      const performerStats = {};
+      branchStaff.forEach(s => {
+        const userDisb = disbursed.filter(c => 
+          c.leader_id === s.id || c.source_cs_id === s.id
+        ).reduce((sum, c) => sum + (c.disbursed_amount || c.disburse_amount || 0), 0);
+        if (userDisb > 0) performerStats[s.id] = { name: s.name, amount: userDisb };
+      });
+      const topPerformer = Object.values(performerStats).sort((a, b) => b.amount - a.amount)[0];
+      
+      return {
+        branch: b,
+        newCustomers, submitted, approved,
+        disbursedCount: disbursed.length, disbursedAmount,
+        conversion,
+        csCount, tlCount, mgrCount,
+        topPerformer
+      };
+    });
+    
+    // Sort by disbursed amount (best branch first)
+    stats.sort((a, b) => b.disbursedAmount - a.disbursedAmount);
+    
+    // Calculate totals for "company-wide"
+    const totals = stats.reduce((t, s) => ({
+      newCustomers: t.newCustomers + s.newCustomers,
+      submitted: t.submitted + s.submitted,
+      disbursedCount: t.disbursedCount + s.disbursedCount,
+      disbursedAmount: t.disbursedAmount + s.disbursedAmount,
+    }), { newCustomers: 0, submitted: 0, disbursedCount: 0, disbursedAmount: 0 });
+    
+    // Max disbursed amount for relative bars
+    const maxDisb = Math.max(...stats.map(s => s.disbursedAmount), 1);
+    
+    // Month picker (last 6 months)
+    const monthOptions = [];
+    for (let i = 0; i < 6; i++) {
+      const d = new Date();
+      d.setDate(1);
+      d.setMonth(d.getMonth() - i);
+      const v = d.toISOString().slice(0, 7);
+      const label = d.toLocaleDateString('en-MY', { month: 'short', year: 'numeric' });
+      monthOptions.push({ v, label });
+    }
+    
+    return this.topBar(user, 'Branch Comparison', `${ym}`) + `
+      <section class="screen">
+        <!-- Month selector -->
+        <div style="padding: 14px 20px;">
+          <label style="display: block; font-size: 10px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 6px;">Comparing Month</label>
+          <select onchange="App.setBranchCompareMonth(this.value)" style="width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-2); font-family: inherit; font-size: 13px;">
+            ${monthOptions.map(o => `<option value="${o.v}" ${o.v === ym ? 'selected' : ''}>${o.label}</option>`).join('')}
+          </select>
+        </div>
+        
+        <!-- Company totals -->
+        <div style="padding: 0 20px 14px;">
+          <div style="background: var(--primary); color: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+            <div style="font-size: 11px; opacity: 0.9; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 800; margin-bottom: 10px;">🏢 Company Total</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+              <div>
+                <div style="font-size: 10px; opacity: 0.8;">Disbursed</div>
+                <div style="font-size: 22px; font-weight: 800;">RM ${(totals.disbursedAmount).toLocaleString()}</div>
+                <div style="font-size: 11px; opacity: 0.8;">${totals.disbursedCount} cases</div>
+              </div>
+              <div>
+                <div style="font-size: 10px; opacity: 0.8;">Submitted (KPI)</div>
+                <div style="font-size: 22px; font-weight: 800;">${totals.submitted}</div>
+                <div style="font-size: 11px; opacity: 0.8;">${totals.newCustomers} new customers</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Branch cards -->
+        <div style="padding: 0 20px;">
+          ${stats.length === 0 ? this.emptyState('Tiada branches dibuat lagi. Tambah branches dari Settings.') : ''}
+          ${stats.map((s, i) => {
+            const isLeader = i === 0 && stats.length > 1;
+            const barWidth = maxDisb > 0 ? Math.round((s.disbursedAmount / maxDisb) * 100) : 0;
+            return `
+              <div style="background: var(--cream-2); border: 1px solid ${isLeader ? 'var(--accent)' : 'var(--border-2)'}; border-radius: 12px; padding: 14px; margin-bottom: 10px; ${isLeader ? 'box-shadow: 0 2px 8px rgba(245,197,24,0.2);' : ''}">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                  <div>
+                    <div style="font-size: 14px; font-weight: 800; color: var(--ink);">
+                      ${isLeader ? '👑 ' : ''}<span style="color: var(--primary);">${s.branch.name}</span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--ink-3); margin-top: 2px;">${s.csCount} CS · ${s.tlCount} TL · ${s.mgrCount} Mgr</div>
+                  </div>
+                  <div style="text-align: right;">
+                    <div style="font-size: 18px; font-weight: 800; color: var(--primary);">RM ${(s.disbursedAmount).toLocaleString()}</div>
+                    <div style="font-size: 10px; color: var(--ink-3);">${s.disbursedCount} disbursed</div>
+                  </div>
+                </div>
+                
+                <!-- Relative disbursed bar -->
+                <div style="background: var(--cream-3); height: 6px; border-radius: 3px; overflow: hidden; margin-bottom: 12px;">
+                  <div style="background: ${isLeader ? 'var(--accent)' : 'var(--primary)'}; height: 100%; width: ${barWidth}%; transition: width 0.3s;"></div>
+                </div>
+                
+                <!-- Stats grid -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+                  <div style="background: var(--cream); border-radius: 8px; padding: 8px; text-align: center;">
+                    <div style="font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em;">New</div>
+                    <div style="font-size: 16px; font-weight: 800; color: var(--ink);">${s.newCustomers}</div>
+                  </div>
+                  <div style="background: var(--cream); border-radius: 8px; padding: 8px; text-align: center;">
+                    <div style="font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em;">Submitted</div>
+                    <div style="font-size: 16px; font-weight: 800; color: var(--ink);">${s.submitted}</div>
+                  </div>
+                  <div style="background: var(--cream); border-radius: 8px; padding: 8px; text-align: center;">
+                    <div style="font-size: 9px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.06em;">Convert</div>
+                    <div style="font-size: 16px; font-weight: 800; color: ${s.conversion > 30 ? '#22C55E' : s.conversion > 15 ? '#F59E0B' : 'var(--ink-3)'};">${s.conversion.toFixed(0)}%</div>
+                  </div>
+                </div>
+                
+                ${s.topPerformer ? `
+                  <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-2); font-size: 11px; color: var(--ink-2);">
+                    🌟 Top: <strong>${s.topPerformer.name}</strong> · RM ${s.topPerformer.amount.toLocaleString()}
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </section>
+    `;
+  },
+  
+  setBranchCompareMonth(ym) {
+    this.state.bcMonth = ym;
+    this.render();
+  },
+  
   renderAdminWeekly(user) {
     // Determine current week
     const offset = this.state.weekOffset || 0;
@@ -6582,6 +7550,8 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
         { icon: 'list', label: 'Customers', screen: 'admin-customers' },
         { icon: 'trophy', label: 'Ranking', screen: 'admin-rankings' },
         { icon: 'users', label: 'Staff', screen: 'admin-staff' },
+        ...(Permissions.canViewAllBranches(Auth.current()) ? [{ icon: 'compare', label: 'Branches', screen: 'admin-branch-compare' }] : []),
+        { icon: 'tools', label: 'Tools', action: 'openAdminTools' },
         { icon: 'export', label: 'Export', screen: 'admin-export' },
       ];
     }
@@ -6595,6 +7565,8 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
       trophy: '<path d="M7 4h10v3a5 5 0 01-10 0V4zM5 4H3v2a3 3 0 003 3M19 4h2v2a3 3 0 01-3 3M12 14v4M8 21h8"/>',
       users: '<circle cx="9" cy="8" r="3"/><path d="M3 21a6 6 0 0112 0M16 11a3 3 0 100-6M21 21a6 6 0 00-6-6"/>',
       bank: '<path d="M3 21h18M5 21V10M9 21V10M15 21V10M19 21V10M2 10h20L12 3 2 10z"/>',
+      compare: '<path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>',
+      tools: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>',
       export: '<path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
       logout: '<path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/>'
     };
@@ -6609,7 +7581,7 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
           }
           return `
           <button class="nav-item ${it.screen === currentScreen ? 'active' : ''} ${it.action === 'logout' ? 'logout' : ''}" 
-                  onclick="${it.action === 'logout' ? 'App.logout()' : `App.goto('${it.screen}')`}" 
+                  onclick="${it.action === 'logout' ? 'App.logout()' : (it.action === 'openAdminTools' ? 'App.openAdminTools()' : `App.goto('${it.screen}')`)}" 
                   style="position: relative;">
             <span class="icon" style="position: relative;">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icons[it.icon]}</svg>
@@ -6622,7 +7594,51 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
     `;
   },
   
-  // ============ ANNOUNCEMENT BANNER (top of all dashboards) ============
+  // ============ ADMIN TOOLS MENU (Sidebar grouping) ============
+  // Opens a quick-access modal for Boss/Manager admin actions:
+  // - Post Announcement
+  // - Manage Koperasi
+  // - Settings (Boss only)
+  openAdminTools() {
+    const user = Auth.current();
+    if (!user) return;
+    const canSettings = Permissions.canEditSettings(user);
+    const canKoperasi = Permissions.canManageKoperasi(user);
+    const canAnnounce = Permissions.canAnnounce(user);
+    
+    const toolButton = (icon, label, sublabel, screen, color, disabled = false) => `
+      <div ${disabled ? '' : `onclick="hideModal(); App.goto('${screen}')"`} 
+           style="display:flex;align-items:center;gap:14px;padding:14px;background:${disabled ? 'var(--cream-3)' : 'var(--cream-2)'};border:1px solid var(--border-2);border-radius:12px;margin-bottom:8px;cursor:${disabled ? 'not-allowed' : 'pointer'};opacity:${disabled ? '0.5' : '1'};transition:all 0.15s;"
+           ${disabled ? '' : `onmouseover="this.style.borderColor='${color}';this.style.transform='translateX(2px)'" onmouseout="this.style.borderColor='var(--border-2)';this.style.transform='translateX(0)'"`}>
+        <div style="width:44px;height:44px;background:${color};color:white;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">${icon}</div>
+        <div style="flex:1;">
+          <div style="font-size:14px;font-weight:800;color:var(--ink);">${label}</div>
+          <div style="font-size:11px;color:var(--ink-3);margin-top:2px;">${sublabel}</div>
+        </div>
+        <div style="color:var(--ink-3);">→</div>
+      </div>
+    `;
+    
+    showModal(`
+      <div class="modal-title">🛠️ Admin Tools</div>
+      <div class="modal-sub">Quick access to management functions</div>
+      
+      <div style="margin-top:14px;">
+        ${toolButton('📢', 'Post Announcement', 'Hantar pengumuman kepada semua staff', 'admin-announcements', '#3B82F6', !canAnnounce)}
+        ${toolButton('🏦', 'Manage Koperasi', 'Tambah/edit loan packages & faedah', 'admin-koperasi', '#F59E0B', !canKoperasi)}
+        ${toolButton('⚙️', 'System Settings', 'KPI tiers, daily targets, commission rules', 'admin-settings', '#DC2626', !canSettings)}
+      </div>
+      
+      ${!canSettings ? `
+        <div style="background:var(--cream-3);border-radius:8px;padding:10px;margin-top:10px;font-size:11px;color:var(--ink-3);">
+          ⚠ Some tools are Boss-only. Manager can access Announcements + Koperasi.
+        </div>
+      ` : ''}
+      
+      <button class="btn-secondary" onclick="hideModal()" style="margin-top:14px;width:100%;">Close</button>
+    `);
+  },
+  
   renderAnnouncementBanner() {
     const anns = Logic.activeAnnouncements();
     if (anns.length === 0) return '';
@@ -6983,7 +7999,19 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
     
     return this.topBar(user, 'Export Reports', 'For monthly HQ submission') + `
       <div class="info-banner info" style="margin: 0 20px 14px;">
-        <strong>Generate monthly reports.</strong> Filter by staff, month, package · download as CSV (open in Excel).
+        <strong>Generate monthly reports.</strong> Filter by staff, month, package, status · download as Excel/CSV.
+      </div>
+      
+      <div style="padding: 0 20px 12px;">
+        <div style="font-size: 11px; color: var(--ink-3); font-weight: 800; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 6px;">📁 Output Format</div>
+        <div style="display: flex; gap: 6px;">
+          <button onclick="App.state.exportFormat = 'xlsx'; App.render();" style="flex:1; padding: 10px; background: ${(this.state.exportFormat || 'xlsx') === 'xlsx' ? 'var(--primary)' : 'var(--cream-2)'}; color: ${(this.state.exportFormat || 'xlsx') === 'xlsx' ? 'white' : 'var(--ink-2)'}; border: 1px solid var(--border); border-radius: 10px; font-family: inherit; font-weight: 800; font-size: 12px; cursor: pointer;">
+            📊 Excel (.xlsx) <span style="font-size:9px;opacity:0.8;display:block;">Multi-sheet · auto-width</span>
+          </button>
+          <button onclick="App.state.exportFormat = 'csv'; App.render();" style="flex:1; padding: 10px; background: ${this.state.exportFormat === 'csv' ? 'var(--primary)' : 'var(--cream-2)'}; color: ${this.state.exportFormat === 'csv' ? 'white' : 'var(--ink-2)'}; border: 1px solid var(--border); border-radius: 10px; font-family: inherit; font-weight: 800; font-size: 12px; cursor: pointer;">
+            📄 CSV <span style="font-size:9px;opacity:0.8;display:block;">Universal · text-only</span>
+          </button>
+        </div>
       </div>
       
       <div class="section-header"><div class="section-title">Filters</div></div>
@@ -7022,6 +8050,16 @@ if (currentUser.role === 'hq' && targetUser?.role === 'admin') {
             ${LOAN_PACKAGES.map(p => `<option value="${p.id}" ${selectedPkg === p.id ? 'selected' : ''}>${p.name}</option>`).join('')}
           </select>
         </div>
+        
+        <div class="form-group">
+          <label>Status (filter)</label>
+          <select id="exp-status" onchange="App.state.exportStatus = this.value; App.render();">
+            <option value="all" ${(this.state.exportStatus || 'all') === 'all' ? 'selected' : ''}>All Statuses</option>
+            ${['new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected'].map(s => 
+              `<option value="${s}" ${this.state.exportStatus === s ? 'selected' : ''}>${STATUS_LABELS[s] || s}</option>`
+            ).join('')}
+          </select>
+        </div>
 <div class="form-group">
           <label>Date Range (semua report)</label>
           <div style="display: flex; gap: 8px; align-items: center;">
@@ -7035,13 +8073,43 @@ ${(this.state.exportFrom || this.state.exportTo) ? '<div style="font-size: 11px;
       
       <div class="section-header"><div class="section-title">Generate Report</div></div>
       <div style="padding: 0 20px 120px;">
+        ${(() => {
+          // Active filters preview
+          const sel = [];
+          if (selectedExportBranch !== 'all') {
+            const b = branches.find(x => x.id === selectedExportBranch);
+            if (b) sel.push(`Branch: ${b.name}`);
+          }
+          if (selectedStaff !== 'all') {
+            const s = DB.user(selectedStaff);
+            if (s) sel.push(`Staff: ${s.name}`);
+          }
+          if (selectedPkg !== 'all') {
+            const p = LOAN_PACKAGES.find(x => x.id === selectedPkg);
+            if (p) sel.push(`Package: ${p.name}`);
+          }
+          if (this.state.exportStatus && this.state.exportStatus !== 'all') {
+            sel.push(`Status: ${STATUS_LABELS[this.state.exportStatus] || this.state.exportStatus}`);
+          }
+          if (this.state.exportFrom || this.state.exportTo) {
+            sel.push(`Date: ${this.state.exportFrom || '...'} → ${this.state.exportTo || '...'}`);
+          } else {
+            sel.push(`Month: ${new Date(selectedYM + '-01').toLocaleDateString('en-MY', {month:'short', year:'numeric'})}`);
+          }
+          return sel.length > 0 ? `
+            <div style="background: var(--accent-glow); border-left: 3px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; color: var(--ink);">
+              <strong style="color: var(--accent-deep);">Filters aktif:</strong> ${sel.join(' · ')}
+            </div>
+          ` : '';
+        })()}
+        
         <div class="qa-card" onclick="App.exportReport('performance')">
           <div class="qa-title">📊 Report A · Per-Staff Performance</div>
           <div class="qa-sub">Each CS/Leader: Payslip / KPI / KFI / Reject / Commission</div>
         </div>
         <div class="qa-card" onclick="App.exportReport('submitted')">
           <div class="qa-title">📋 Report B · All Submitted Cases</div>
-          <div class="qa-sub">Date, Customer, IC, Package, Loan, KFI, Status</div>
+          <div class="qa-sub">Date, Customer, IC, Package, Loan, KFI, Status${this.state.exportStatus && this.state.exportStatus !== 'all' ? ` · Filtered to ${STATUS_LABELS[this.state.exportStatus]}` : ''}</div>
         </div>
         <div class="qa-card" onclick="App.exportReport('disbursed')">
           <div class="qa-title">💰 Report C · Disbursement List</div>
@@ -7051,6 +8119,22 @@ ${(this.state.exportFrom || this.state.exportTo) ? '<div style="font-size: 11px;
           <div class="qa-title">📋 Report D · Daily Submission</div>
           <div class="qa-sub">Full HQ format · Pilih tarikh atau bulan</div>
         </div>
+        <div class="qa-card" onclick="App.exportReport('by-status')" style="border-left: 4px solid #16A34A;">
+          <div class="qa-title">📑 Report E · By Status (NEW)</div>
+          <div class="qa-sub">Customers grouped by status · pilih status atau semua untuk breakdown lengkap</div>
+        </div>
+        <div class="qa-card" onclick="App.exportReport('full-customer-list')" style="border-left: 4px solid #7C3AED;">
+          <div class="qa-title">📂 Report F · Full Customer Database</div>
+          <div class="qa-sub">Lengkap: phone, IC, gaji, package, status, semua dates · for HQ master record</div>
+        </div>
+        <div class="qa-card" onclick="App.exportReport('koperasi-performance')" style="border-left: 4px solid #0EA5E9;">
+          <div class="qa-title">🏦 Report G · Per-Koperasi Performance (NEW)</div>
+          <div class="qa-sub">Approval rate, disburse rate, avg loan per package · find best/worst koperasi</div>
+        </div>
+        <div class="qa-card" onclick="App.exportReport('cs-activity-timeline')" style="border-left: 4px solid #EC4899;">
+          <div class="qa-title">📅 Report H · CS Activity Timeline (NEW)</div>
+          <div class="qa-sub">Daily calls/WA/payslip per CS · find who's consistent vs slacking</div>
+        </div>
       </div>
     `;
   },
@@ -7059,6 +8143,7 @@ ${(this.state.exportFrom || this.state.exportTo) ? '<div style="font-size: 11px;
     const ym = this.state.exportMonth || new Date().toISOString().slice(0,7);
     const staff = this.state.exportStaff || 'all';
     const pkg = this.state.exportPkg || 'all';
+    const statusFilter = this.state.exportStatus || 'all';
     const exportFrom = this.state.exportFrom || null;
     const exportTo = this.state.exportTo || null;
     const exportBranch = this.state.exportBranch || 'all';
@@ -7069,7 +8154,8 @@ ${(this.state.exportFrom || this.state.exportTo) ? '<div style="font-size: 11px;
     
 let rows = [];
     const dateLabel = exportFrom && exportTo ? `${exportFrom}_to_${exportTo}` : exportFrom ? `from_${exportFrom}` : exportTo ? `to_${exportTo}` : ym;
-    let filename = `awara_${type}_${dateLabel}${branchFilter ? '_' + branchFilter : ''}.csv`;
+    const statusLabel = statusFilter !== 'all' ? `_${statusFilter}` : '';
+    let filename = `awara_${type}_${dateLabel}${statusLabel}${branchFilter ? '_' + branchFilter : ''}.csv`;
 
     const filterByDate = (cases, dateField) => {
       if (exportFrom && exportTo) return cases.filter(c => c[dateField] && c[dateField] >= exportFrom && c[dateField] <= exportTo);
@@ -7118,7 +8204,7 @@ let rows = [];
     }
     
 if (type === 'submitted') {
-      rows.push(['SUBMITTED CASES REPORT', ym]);
+      rows.push(['SUBMITTED CASES REPORT', ym, statusFilter !== 'all' ? `Status: ${STATUS_LABELS[statusFilter] || statusFilter}` : '']);
       rows.push(['Generated:', new Date().toLocaleString('en-MY')]);
       rows.push([]);
 
@@ -7128,6 +8214,7 @@ if (type === 'submitted') {
       );
       if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
       if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
+      if (statusFilter !== 'all') cases = cases.filter(c => c.status === statusFilter);
       if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
       cases.sort((a,b) => (a.leader_id||'').localeCompare(b.leader_id||'') || (a.source_cs_id||'').localeCompare(b.source_cs_id||'') || (a.date_submitted || a.date_payslip || '').localeCompare(b.date_submitted || b.date_payslip || ''));
 
@@ -7249,7 +8336,424 @@ if (type === 'disbursed') {
       });
     }
     
+    // ============ REPORT E: BY STATUS (grouped or filtered) ============
+    if (type === 'by-status') {
+      const statusOrder = ['new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected'];
+      
+      // Get filtered cases (uses date_payslip as primary date)
+      let cases = DB.cases().filter(c => filterByDate([c], 'date_payslip').length > 0);
+      if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
+      if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
+      if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
+      
+      // If specific status, filter to that. Otherwise show all statuses grouped.
+      const statusList = statusFilter !== 'all' ? [statusFilter] : statusOrder;
+      
+      rows.push(['CUSTOMER STATUS REPORT', ym, statusFilter !== 'all' ? `Status: ${STATUS_LABELS[statusFilter]}` : 'All Statuses']);
+      rows.push(['Generated:', new Date().toLocaleString('en-MY'), 'By:', user.name]);
+      rows.push([]);
+      
+      // Summary first
+      rows.push(['STATUS SUMMARY']);
+      rows.push(['Status', 'Count', 'Total Loan (RM)']);
+      statusList.forEach(s => {
+        const sCases = cases.filter(c => c.status === s);
+        if (sCases.length > 0) {
+          const totalLoan = sCases.reduce((sum, c) => sum + (c.loan_amount || 0), 0);
+          rows.push([STATUS_LABELS[s] || s, sCases.length, totalLoan.toFixed(2)]);
+        }
+      });
+      rows.push(['TOTAL', cases.filter(c => statusList.includes(c.status)).length, cases.filter(c => statusList.includes(c.status)).reduce((s, c) => s + (c.loan_amount || 0), 0).toFixed(2)]);
+      rows.push([]);
+      
+      // Detail per status
+      statusList.forEach(s => {
+        const sCases = cases.filter(c => c.status === s);
+        if (sCases.length === 0) return;
+        
+        rows.push([]);
+        rows.push([`═══ ${(STATUS_LABELS[s] || s).toUpperCase()} (${sCases.length} cases) ═══`]);
+        rows.push(['No', 'Customer Name', 'IC', 'Phone', 'CS', 'Leader', 'Branch', 'Package', 'Loan (RM)', 'Date Payslip', 'Date Submitted', 'Date Approved', 'Date Disbursed', 'Remark']);
+        
+        // Sort by date_payslip newest first
+        sCases.sort((a, b) => (b.date_payslip || '').localeCompare(a.date_payslip || ''));
+        
+        sCases.forEach((c, i) => {
+          const csUser = DB.user(c.source_cs_id);
+          const leaderUser = DB.user(c.leader_id);
+          const branch = DB.branch(c.branch_id);
+          const pkgObj = LOAN_PACKAGES.find(p => p.id === c.package_id);
+          let remark = '';
+          if (s === 'pending') remark = c.pending_reason || '';
+          else if (s === 'on_hold') remark = c.hold_reason || '';
+          else if (s === 'rejected') remark = c.rejection_reason || '';
+          else remark = c.remark_admin || '';
+          
+          rows.push([
+            i + 1,
+            c.customer_name || '',
+            c.ic || '',
+            c.phone || '',
+            csUser?.name || c.source_cs_id || '',
+            leaderUser?.name || c.leader_id || '',
+            branch?.name || c.branch_id || '',
+            pkgObj?.name || c.package_id || '',
+            (c.loan_amount || 0).toFixed(2),
+            c.date_payslip || '',
+            c.date_submitted || '',
+            c.date_approved || '',
+            c.date_disbursed || '',
+            remark
+          ]);
+        });
+        
+        // Subtotal for this status
+        const totalLoan = sCases.reduce((sum, c) => sum + (c.loan_amount || 0), 0);
+        rows.push(['', '', '', '', '', '', '', 'SUBTOTAL', totalLoan.toFixed(2)]);
+      });
+    }
+    
+    // ============ REPORT F: FULL CUSTOMER DATABASE ============
+    if (type === 'full-customer-list') {
+      let cases = DB.cases().filter(c => filterByDate([c], 'date_payslip').length > 0);
+      if (staff !== 'all') cases = cases.filter(c => c.source_cs_id === staff || c.leader_id === staff);
+      if (pkg !== 'all') cases = cases.filter(c => c.package_id === pkg);
+      if (statusFilter !== 'all') cases = cases.filter(c => c.status === statusFilter);
+      if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
+      
+      rows.push(['FULL CUSTOMER DATABASE EXPORT', ym]);
+      rows.push(['Generated:', new Date().toLocaleString('en-MY'), 'By:', user.name]);
+      rows.push(['Total records:', cases.length]);
+      rows.push(['⚠ SENSITIVE DATA · Handle with care']);
+      rows.push([]);
+      
+      rows.push([
+        'No', 'Customer Name', 'IC', 'Phone', 'Majikan',
+        'Pendapatan', 'Potongan', 'Gaji Bersih', 'Gaji %',
+        'CS Name', 'CS Role', 'Leader Name', 'Branch',
+        'Status', 'Package', 'Loan Amount', 'Tenor',
+        'Bulanan', 'Case Type',
+        'Date Payslip', 'Date Submitted', 'Date Approved', 'Date Disbursed',
+        'Approved Amount', 'Disbursed Amount',
+        'AMM Pass', 'HRMIS Pass',
+        'Pending Reason', 'Hold Reason', 'Rejection Reason',
+        'Follow-up Date', 'Follow-up Note',
+        'Remark Admin', 'Created', 'Duplicate?'
+      ]);
+      
+      // Sort newest first
+      cases.sort((a, b) => (b.date_payslip || '').localeCompare(a.date_payslip || ''));
+      
+      cases.forEach((c, i) => {
+        const csUser = DB.user(c.source_cs_id);
+        const leaderUser = DB.user(c.leader_id);
+        const branch = DB.branch(c.branch_id);
+        const pkgObj = LOAN_PACKAGES.find(p => p.id === c.package_id);
+        
+        rows.push([
+          i + 1,
+          c.customer_name || '',
+          c.ic || '',
+          c.phone || '',
+          c.majikan || '',
+          (c.pendapatan || 0).toFixed(2),
+          (c.potongan || 0).toFixed(2),
+          (c.gaji_bersih || 0).toFixed(2),
+          (c.gaji_bersih_pct || 0).toFixed(1) + '%',
+          csUser?.name || c.source_cs_id || '',
+          ROLE_LABELS[csUser?.role] || '',
+          leaderUser?.name || c.leader_id || '',
+          branch?.name || c.branch_id || '',
+          STATUS_LABELS[c.status] || c.status,
+          pkgObj?.name || c.package_id || '',
+          (c.loan_amount || 0).toFixed(2),
+          c.tenor || '',
+          (c.bulanan || 0).toFixed(2),
+          c.case_type || '',
+          c.date_payslip || '',
+          c.date_submitted || '',
+          c.date_approved || '',
+          c.date_disbursed || '',
+          (c.approved_amount || 0).toFixed(2),
+          (c.disbursed_amount || c.disburse_amount || 0).toFixed(2),
+          c.anm_password || '',
+          c.hrmis_password || '',
+          c.pending_reason || '',
+          c.hold_reason || '',
+          c.rejection_reason || '',
+          c.follow_up_date || '',
+          c.follow_up_note || '',
+          c.remark_admin || '',
+          c.created_at ? new Date(c.created_at).toLocaleString('en-MY') : '',
+          c.is_duplicate ? 'YES' : 'NO'
+        ]);
+      });
+    }
+    
+    // ============ REPORT G: PER-KOPERASI PERFORMANCE ============
+    if (type === 'koperasi-performance') {
+      let cases = DB.cases().filter(c => filterByDate([c], 'date_payslip').length > 0);
+      if (branchFilter) cases = cases.filter(c => c.branch_id === branchFilter);
+      
+      // Group by package
+      const pkgStats = {};
+      LOAN_PACKAGES.forEach(p => {
+        pkgStats[p.id] = {
+          pkg: p,
+          submitted: 0, approved: 0, disbursed: 0, rejected: 0, pending: 0, on_hold: 0,
+          submittedAmount: 0, approvedAmount: 0, disbursedAmount: 0,
+          topPushers: {}  // userId -> count
+        };
+      });
+      
+      cases.forEach(c => {
+        if (!c.package_id || !pkgStats[c.package_id]) return;
+        const s = pkgStats[c.package_id];
+        const loanAmt = c.loan_amount || 0;
+        
+        // Count by lifecycle stage
+        if (['submitted', 'approved', 'disbursed', 'pending', 'on_hold'].includes(c.status)) {
+          s.submitted++;
+          s.submittedAmount += loanAmt;
+        }
+        if (['approved', 'disbursed'].includes(c.status)) {
+          s.approved++;
+          s.approvedAmount += (c.approved_amount || loanAmt);
+        }
+        if (c.status === 'disbursed') {
+          s.disbursed++;
+          s.disbursedAmount += (c.disbursed_amount || c.disburse_amount || loanAmt);
+        }
+        if (c.status === 'rejected') s.rejected++;
+        if (c.status === 'pending') s.pending++;
+        if (c.status === 'on_hold') s.on_hold++;
+        
+        // Top pusher (CS who submitted)
+        const csId = c.source_cs_id;
+        if (csId) s.topPushers[csId] = (s.topPushers[csId] || 0) + 1;
+      });
+      
+      // Sort by disbursed amount (best koperasi first)
+      const sorted = Object.values(pkgStats)
+        .filter(s => s.submitted > 0)
+        .sort((a, b) => b.disbursedAmount - a.disbursedAmount);
+      
+      // === Sheet 1: Summary ===
+      const summaryRows = [];
+      summaryRows.push(['PER-KOPERASI PERFORMANCE REPORT', ym]);
+      summaryRows.push(['Generated:', new Date().toLocaleString('en-MY'), 'By:', user.name]);
+      summaryRows.push([]);
+      summaryRows.push(['Rank', 'Koperasi', 'Rate%', 'Tenor', 'Submitted', 'Approved', 'Disbursed', 'Rejected', 'Pending', 'On Hold', 'Approval Rate', 'Disburse Rate', 'Total Submitted (RM)', 'Total Disbursed (RM)', 'Avg Loan (RM)', 'Top Pusher']);
+      sorted.forEach((s, i) => {
+        const apvRate = s.submitted > 0 ? (s.approved / s.submitted * 100).toFixed(1) + '%' : '0%';
+        const disbRate = s.submitted > 0 ? (s.disbursed / s.submitted * 100).toFixed(1) + '%' : '0%';
+        const avgLoan = s.submitted > 0 ? (s.submittedAmount / s.submitted).toFixed(2) : '0';
+        // Top pusher
+        const topPusherEntry = Object.entries(s.topPushers).sort((a, b) => b[1] - a[1])[0];
+        const topPusherName = topPusherEntry ? `${DB.user(topPusherEntry[0])?.name || topPusherEntry[0]} (${topPusherEntry[1]})` : '—';
+        summaryRows.push([
+          i + 1,
+          s.pkg.name,
+          (s.pkg.rate || 0).toFixed(2),
+          s.pkg.tenor || '',
+          s.submitted,
+          s.approved,
+          s.disbursed,
+          s.rejected,
+          s.pending,
+          s.on_hold,
+          apvRate,
+          disbRate,
+          s.submittedAmount.toFixed(2),
+          s.disbursedAmount.toFixed(2),
+          avgLoan,
+          topPusherName
+        ]);
+      });
+      // Total row
+      const total = sorted.reduce((t, s) => ({
+        submitted: t.submitted + s.submitted, approved: t.approved + s.approved,
+        disbursed: t.disbursed + s.disbursed, rejected: t.rejected + s.rejected,
+        submittedAmount: t.submittedAmount + s.submittedAmount,
+        disbursedAmount: t.disbursedAmount + s.disbursedAmount
+      }), { submitted: 0, approved: 0, disbursed: 0, rejected: 0, submittedAmount: 0, disbursedAmount: 0 });
+      summaryRows.push([]);
+      summaryRows.push(['TOTAL', '', '', '', total.submitted, total.approved, total.disbursed, total.rejected, '', '',
+        total.submitted > 0 ? (total.approved / total.submitted * 100).toFixed(1) + '%' : '0%',
+        total.submitted > 0 ? (total.disbursed / total.submitted * 100).toFixed(1) + '%' : '0%',
+        total.submittedAmount.toFixed(2), total.disbursedAmount.toFixed(2), '', '']);
+      
+      // === Sheet 2: Detail per Koperasi (only for Excel format) ===
+      const detailRows = [];
+      detailRows.push(['KOPERASI DETAIL · per case']);
+      detailRows.push([]);
+      sorted.forEach(s => {
+        detailRows.push([`═══ ${s.pkg.name} (${s.submitted} cases) ═══`]);
+        detailRows.push(['Customer', 'IC', 'CS', 'Leader', 'Branch', 'Status', 'Loan', 'Disbursed', 'Date Payslip', 'Date Submitted', 'Date Disbursed']);
+        cases.filter(c => c.package_id === s.pkg.id).forEach(c => {
+          const csUser = DB.user(c.source_cs_id);
+          const leaderUser = DB.user(c.leader_id);
+          const branch = DB.branch(c.branch_id);
+          detailRows.push([
+            c.customer_name || '', c.ic || '',
+            csUser?.name || '', leaderUser?.name || '',
+            branch?.name || '', STATUS_LABELS[c.status] || c.status,
+            (c.loan_amount || 0).toFixed(2),
+            (c.disbursed_amount || c.disburse_amount || 0).toFixed(2),
+            c.date_payslip || '', c.date_submitted || '', c.date_disbursed || ''
+          ]);
+        });
+        detailRows.push([]);
+      });
+      
+      // Use Excel multi-sheet if available
+      if ((this.state.exportFormat || 'xlsx') === 'xlsx') {
+        downloadAsExcel(filename.replace('.csv', '.xlsx'), [
+          { name: 'Summary', rows: summaryRows },
+          { name: 'Detail', rows: detailRows }
+        ]);
+        toast(`Report downloaded: ${filename.replace('.csv', '.xlsx')}`);
+        return;
+      } else {
+        rows = [...summaryRows, [], [], ...detailRows];
+      }
+    }
+    
+    // ============ REPORT H: CS ACTIVITY TIMELINE ============
+    if (type === 'cs-activity-timeline') {
+      // Determine date range
+      const today = new Date().toISOString().slice(0, 10);
+      const firstDayOfMonth = ym + '-01';
+      const fromDate = exportFrom || firstDayOfMonth;
+      const toDate = exportTo || today;
+      
+      // Build day list
+      const days = [];
+      let d = new Date(fromDate);
+      const endD = new Date(toDate);
+      while (d <= endD) {
+        days.push(d.toISOString().slice(0, 10));
+        d.setDate(d.getDate() + 1);
+      }
+      
+      // Get target staff (CS + Solo)
+      let targets = DB.users().filter(u => ['cs', 'solo'].includes(u.role) && !u.inactive);
+      if (staff !== 'all') targets = targets.filter(u => u.id === staff);
+      if (branchFilter) targets = targets.filter(u => u.branch_id === branchFilter);
+      
+      // Sheet 1: Activity Summary
+      const sumRows = [];
+      sumRows.push(['CS ACTIVITY TIMELINE', `${fromDate} → ${toDate}`]);
+      sumRows.push(['Generated:', new Date().toLocaleString('en-MY'), 'By:', user.name]);
+      sumRows.push(['Working days:', days.length]);
+      sumRows.push([]);
+      sumRows.push(['Name', 'Role', 'Branch', 'Total Calls', 'Total WA', 'Total Payslip', 'Active Days', 'Avg Calls/Day', 'Avg WA/Day', 'Avg Payslip/Day']);
+      
+      const activities = DB.activities();
+      const staffActivity = {};  // userId -> { calls, wa, payslip, activeDays }
+      targets.forEach(u => {
+        staffActivity[u.id] = { calls: 0, whatsapp: 0, payslip: 0, activeDays: 0, byDay: {} };
+        days.forEach(day => {
+          const a = activities.find(x => x.cs_id === u.id && x.date === day);
+          if (a) {
+            staffActivity[u.id].calls += a.calls || 0;
+            staffActivity[u.id].whatsapp += a.whatsapp || 0;
+            staffActivity[u.id].payslip += a.payslip || 0;
+            if ((a.calls || 0) > 0 || (a.whatsapp || 0) > 0 || (a.payslip || 0) > 0) {
+              staffActivity[u.id].activeDays++;
+            }
+            staffActivity[u.id].byDay[day] = a;
+          }
+        });
+      });
+      
+      // Sort by total payslip desc
+      targets.sort((a, b) => (staffActivity[b.id]?.payslip || 0) - (staffActivity[a.id]?.payslip || 0));
+      targets.forEach(u => {
+        const s = staffActivity[u.id];
+        const branch = DB.branch(u.branch_id);
+        const activeD = s.activeDays || 1;
+        sumRows.push([
+          u.name, ROLE_LABELS[u.role] || u.role, branch?.name || '',
+          s.calls, s.whatsapp, s.payslip, s.activeDays,
+          (s.calls / activeD).toFixed(1), (s.whatsapp / activeD).toFixed(1), (s.payslip / activeD).toFixed(2)
+        ]);
+      });
+      
+      // Sheet 2: Daily breakdown (pivot: staff × day)
+      const dailyRows = [];
+      dailyRows.push(['DAILY CALLS PER STAFF']);
+      dailyRows.push(['Name', ...days.map(d => d.slice(5))]);  // MM-DD
+      targets.forEach(u => {
+        const s = staffActivity[u.id];
+        dailyRows.push([u.name, ...days.map(d => s.byDay[d]?.calls || 0)]);
+      });
+      dailyRows.push([]);
+      dailyRows.push(['DAILY WHATSAPP PER STAFF']);
+      dailyRows.push(['Name', ...days.map(d => d.slice(5))]);
+      targets.forEach(u => {
+        const s = staffActivity[u.id];
+        dailyRows.push([u.name, ...days.map(d => s.byDay[d]?.whatsapp || 0)]);
+      });
+      dailyRows.push([]);
+      dailyRows.push(['DAILY PAYSLIP PER STAFF']);
+      dailyRows.push(['Name', ...days.map(d => d.slice(5))]);
+      targets.forEach(u => {
+        const s = staffActivity[u.id];
+        dailyRows.push([u.name, ...days.map(d => s.byDay[d]?.payslip || 0)]);
+      });
+      
+      if ((this.state.exportFormat || 'xlsx') === 'xlsx') {
+        downloadAsExcel(filename.replace('.csv', '.xlsx'), [
+          { name: 'Summary', rows: sumRows },
+          { name: 'Daily Breakdown', rows: dailyRows }
+        ]);
+        toast(`Report downloaded: ${filename.replace('.csv', '.xlsx')}`);
+        return;
+      } else {
+        rows = [...sumRows, [], [], ...dailyRows];
+      }
+    }
+    
     if (rows.length <= 4) { toast('No data for this filter'); return; }
+    
+    // Output as Excel (default) or CSV based on user preference
+    const format = this.state.exportFormat || 'xlsx';
+    if (format === 'xlsx') {
+      // For Excel, use multi-sheet if data has natural sections, otherwise single sheet
+      const xlsxFilename = filename.replace('.csv', '.xlsx');
+      
+      // Detect multi-section reports by looking for "═══" header markers
+      const sections = [];
+      let currentSection = { name: 'Sheet1', rows: [] };
+      
+      rows.forEach(row => {
+        const firstCell = String(row[0] || '');
+        // Section header: starts with ═══
+        if (firstCell.startsWith('═══')) {
+          if (currentSection.rows.length > 0) {
+            sections.push(currentSection);
+          }
+          const name = firstCell.replace(/═/g, '').trim().split('(')[0].trim();
+          currentSection = { name: name.substring(0, 31) || 'Detail', rows: [row] };
+        } else {
+          currentSection.rows.push(row);
+        }
+      });
+      if (currentSection.rows.length > 0) sections.push(currentSection);
+      
+      // If only one section, just dump everything into one sheet
+      if (sections.length <= 1) {
+        downloadAsExcel(xlsxFilename, [{ name: 'Report', rows: rows }]);
+      } else {
+        // Multi-section: first is overview/summary, rest are detail
+        downloadAsExcel(xlsxFilename, sections);
+      }
+      toast(`Report downloaded: ${xlsxFilename}`);
+      return;
+    }
+    
+    // CSV fallback
     
     const csv = rows.map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g,'""')}"`).join(',')).join('\n');
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
@@ -7472,6 +8976,21 @@ if (type === 'disbursed') {
         <button class="submit-btn" onclick="App.saveSettings()" style="margin-bottom: 10px;">💾 Save All Settings</button>
         <button class="btn-secondary" onclick="App.discardSettings()">Discard Changes</button>
         <button class="btn-secondary" style="color: var(--danger); border-color: rgba(184, 66, 58, 0.3); margin-top: 8px;" onclick="App.resetSettings()">↻ Reset to Factory Defaults</button>
+        
+        <!-- ============ DATA BACKUP / RESTORE ============ -->
+        <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border-2);">
+          <div style="font-size: 14px; font-weight: 800; color: var(--ink); margin-bottom: 4px;">💾 Data Backup</div>
+          <div style="font-size: 11px; color: var(--ink-3); margin-bottom: 12px;">Download complete backup of all data (users, customers, cases, settings, branches, koperasi).</div>
+          
+          <button class="btn-secondary" style="background: rgba(34,197,94,0.08); border-color: rgba(34,197,94,0.3); color: #166534; font-weight: 700;" onclick="App.downloadBackup()">
+            ⬇ Download Backup (JSON)
+          </button>
+          
+          <div style="font-size: 10px; color: var(--ink-3); margin-top: 8px; line-height: 1.5;">
+            ⚠ Backup contains <strong>sensitive customer data</strong> (IC, phone, payslip). Simpan secure location only. 
+            Recommended: backup weekly.
+          </div>
+        </div>
       </div>
     `;
   },
@@ -7787,6 +9306,8 @@ removeListItem(key, idx) {
   },
 
   deleteBranch(branchId) {
+    if (!Permissions.canEditSettings(Auth.current())) { toast('Hanya Boss boleh manage branches'); return; }
+    if (branchId === 'hq') { toast('Tidak boleh delete HQ branch'); return; }
     const staffInBranch = DB.users().filter(u => u.branch_id === branchId);
     if (staffInBranch.length > 0) {
       toast(`Tidak boleh delete · ${staffInBranch.length} staff masih dalam branch ini`);
@@ -7797,6 +9318,506 @@ removeListItem(key, idx) {
     DB.saveBranches(branches);
     toast('Branch deleted');
     this.render();
+  },
+  
+  // ============ BULK ACTIONS (Multi-Select) ============
+  // Allows Boss/Manager/HQ to select multiple cases at once and perform actions
+  toggleBulkMode() {
+    this.state.bulkMode = !this.state.bulkMode;
+    this.state.bulkSelected = [];
+    this.render();
+  },
+  
+  toggleBulkSelect(caseId) {
+    if (!this.state.bulkSelected) this.state.bulkSelected = [];
+    const idx = this.state.bulkSelected.indexOf(caseId);
+    if (idx === -1) {
+      this.state.bulkSelected.push(caseId);
+    } else {
+      this.state.bulkSelected.splice(idx, 1);
+    }
+    this.render();
+  },
+  
+  bulkSelectAll(caseIds) {
+    this.state.bulkSelected = [...caseIds];
+    this.render();
+  },
+  
+  bulkClearSelection() {
+    this.state.bulkSelected = [];
+    this.render();
+  },
+  
+  renderBulkActionBar(visibleCases, user) {
+    const selected = this.state.bulkSelected || [];
+    const visibleIds = visibleCases.map(c => c.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selected.includes(id));
+    
+    return `
+      <div style="position:sticky;top:0;z-index:50;background:var(--primary);color:white;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;box-shadow:0 2px 8px rgba(0,0,0,0.15);">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:16px;font-weight:800;">${selected.length}</span>
+          <span style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;">selected</span>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${selected.length === 0 ? `
+            <button onclick="App.bulkSelectAll([${visibleIds.map(id => `'${id}'`).join(',')}])" style="background:rgba(255,255,255,0.2);color:white;border:1px solid rgba(255,255,255,0.4);padding:6px 12px;border-radius:6px;font-family:inherit;font-weight:700;font-size:11px;cursor:pointer;">Select All (${visibleIds.length})</button>
+          ` : `
+            ${!allVisibleSelected ? `<button onclick="App.bulkSelectAll([${visibleIds.map(id => `'${id}'`).join(',')}])" style="background:rgba(255,255,255,0.2);color:white;border:1px solid rgba(255,255,255,0.4);padding:6px 10px;border-radius:6px;font-family:inherit;font-weight:700;font-size:11px;cursor:pointer;">Select All</button>` : ''}
+            <button onclick="App.bulkClearSelection()" style="background:rgba(255,255,255,0.2);color:white;border:1px solid rgba(255,255,255,0.4);padding:6px 10px;border-radius:6px;font-family:inherit;font-weight:700;font-size:11px;cursor:pointer;">Clear</button>
+            <button onclick="App.openBulkActions()" style="background:var(--accent);color:var(--primary-dark);border:none;padding:6px 14px;border-radius:6px;font-family:inherit;font-weight:800;font-size:11px;cursor:pointer;">Actions ▾</button>
+          `}
+        </div>
+      </div>
+    `;
+  },
+  
+  openBulkActions() {
+    const selected = this.state.bulkSelected || [];
+    if (selected.length === 0) { toast('Sila pilih cases dulu'); return; }
+    
+    const user = Auth.current();
+    const canDelete = Permissions.canDelete(user);
+    const allUsers = DB.users().filter(u => !u.inactive);
+    const branches = DB.branches();
+    
+    // Group selected cases by status for preview
+    const cases = selected.map(id => DB.caseById(id)).filter(Boolean);
+    const statusCount = {};
+    cases.forEach(c => { statusCount[c.status] = (statusCount[c.status] || 0) + 1; });
+    
+    showModal(`
+      <div class="modal-title">☑️ Bulk Actions</div>
+      <div class="modal-sub">${selected.length} cases selected</div>
+      
+      <div style="background:var(--cream-2);border-radius:8px;padding:10px;margin-bottom:14px;font-size:11px;line-height:1.6;">
+        <strong>Selected breakdown:</strong>
+        ${Object.entries(statusCount).map(([s, n]) => `<div>• ${STATUS_LABELS[s] || s}: ${n}</div>`).join('')}
+      </div>
+      
+      <div class="form-group">
+        <label>Pilih Action</label>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button class="btn-secondary" onclick="App.bulkChangeStatus()" style="text-align:left;padding:12px;">
+            🔄 Change Status
+          </button>
+          <button class="btn-secondary" onclick="App.bulkReassignLeader()" style="text-align:left;padding:12px;">
+            👥 Reassign Team Leader / Solo
+          </button>
+          <button class="btn-secondary" onclick="App.bulkReassignCS()" style="text-align:left;padding:12px;">
+            👤 Reassign Source CS
+          </button>
+          ${canDelete ? `
+            <button class="btn-secondary" onclick="App.bulkDelete()" style="text-align:left;padding:12px;color:#DC2626;border-color:rgba(220,38,38,0.3);">
+              🗑️ Delete All Selected (Boss only · permanent)
+            </button>
+          ` : ''}
+        </div>
+      </div>
+      
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+    `);
+  },
+  
+  bulkChangeStatus() {
+    const selected = this.state.bulkSelected || [];
+    showModal(`
+      <div class="modal-title">🔄 Change Status</div>
+      <div class="modal-sub">${selected.length} cases akan dikemaskini</div>
+      
+      <div class="form-group">
+        <label>New Status</label>
+        <select id="bulk-status" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--border-2);font-family:inherit;font-size:14px;">
+          <option value="">-- Pilih Status --</option>
+          ${['new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected'].map(s => 
+            `<option value="${s}">${STATUS_LABELS[s] || s}</option>`
+          ).join('')}
+        </select>
+      </div>
+      
+      <button class="submit-btn" onclick="App.confirmBulkStatus()">Apply to ${selected.length} cases</button>
+      <button class="btn-secondary" onclick="App.openBulkActions()">← Back</button>
+    `);
+  },
+  
+  confirmBulkStatus() {
+    const newStatus = document.getElementById('bulk-status').value;
+    if (!newStatus) { toast('Sila pilih status'); return; }
+    
+    const selected = this.state.bulkSelected || [];
+    if (!confirm(`Tukar status ${selected.length} cases ke "${STATUS_LABELS[newStatus] || newStatus}"?`)) return;
+    
+    let success = 0, fail = 0;
+    selected.forEach(id => {
+      try {
+        DB.updateCase(id, { status: newStatus });
+        success++;
+      } catch (e) { fail++; }
+    });
+    
+    hideModal();
+    this.state.bulkMode = false;
+    this.state.bulkSelected = [];
+    toast(`✓ ${success} cases updated${fail > 0 ? ` · ⚠ ${fail} failed` : ''}`);
+    this.render();
+  },
+  
+  bulkReassignLeader() {
+    const selected = this.state.bulkSelected || [];
+    const leaders = DB.users().filter(u => (u.role === 'leader' || u.role === 'solo') && !u.inactive);
+    
+    showModal(`
+      <div class="modal-title">👥 Reassign Leader</div>
+      <div class="modal-sub">${selected.length} cases akan dipindah ke leader baru</div>
+      
+      <div class="form-group">
+        <label>New Team Leader / Solo</label>
+        <select id="bulk-leader" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--border-2);font-family:inherit;font-size:14px;">
+          <option value="">-- Pilih Leader --</option>
+          ${leaders.map(l => `<option value="${l.id}">${l.name} (${ROLE_LABELS[l.role]}) · ${DB.branch(l.branch_id)?.name || ''}</option>`).join('')}
+        </select>
+      </div>
+      
+      <button class="submit-btn" onclick="App.confirmBulkLeader()">Apply to ${selected.length} cases</button>
+      <button class="btn-secondary" onclick="App.openBulkActions()">← Back</button>
+    `);
+  },
+  
+  confirmBulkLeader() {
+    const leaderId = document.getElementById('bulk-leader').value;
+    if (!leaderId) { toast('Sila pilih leader'); return; }
+    
+    const leader = DB.user(leaderId);
+    const selected = this.state.bulkSelected || [];
+    if (!confirm(`Pindah ${selected.length} cases ke ${leader.name}?`)) return;
+    
+    let success = 0, fail = 0;
+    selected.forEach(id => {
+      try {
+        DB.updateCase(id, { leader_id: leaderId, branch_id: leader.branch_id });
+        success++;
+      } catch (e) { fail++; }
+    });
+    
+    hideModal();
+    this.state.bulkMode = false;
+    this.state.bulkSelected = [];
+    toast(`✓ ${success} cases dipindah ke ${leader.name}${fail > 0 ? ` · ⚠ ${fail} failed` : ''}`);
+    this.render();
+  },
+  
+  bulkReassignCS() {
+    const selected = this.state.bulkSelected || [];
+    const css = DB.users().filter(u => (u.role === 'cs' || u.role === 'solo') && !u.inactive);
+    
+    showModal(`
+      <div class="modal-title">👤 Reassign Source CS</div>
+      <div class="modal-sub">${selected.length} cases akan dipindah ke CS baru</div>
+      
+      <div class="form-group">
+        <label>New Source CS</label>
+        <select id="bulk-cs" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--border-2);font-family:inherit;font-size:14px;">
+          <option value="">-- Pilih CS --</option>
+          ${css.map(c => `<option value="${c.id}">${c.name} (${ROLE_LABELS[c.role]}) · ${DB.branch(c.branch_id)?.name || ''}</option>`).join('')}
+        </select>
+      </div>
+      
+      <div style="background:#FEF3C7;border-radius:8px;padding:10px;font-size:11px;color:#92400E;margin-bottom:10px;">
+        ⚠ This will affect <strong>CS commission calculations</strong> for these cases.
+      </div>
+      
+      <button class="submit-btn" onclick="App.confirmBulkCS()">Apply to ${selected.length} cases</button>
+      <button class="btn-secondary" onclick="App.openBulkActions()">← Back</button>
+    `);
+  },
+  
+  confirmBulkCS() {
+    const csId = document.getElementById('bulk-cs').value;
+    if (!csId) { toast('Sila pilih CS'); return; }
+    
+    const cs = DB.user(csId);
+    const selected = this.state.bulkSelected || [];
+    if (!confirm(`Pindah ${selected.length} cases ke source CS ${cs.name}?\n\n⚠ This affects commission calculations.`)) return;
+    
+    let success = 0, fail = 0;
+    selected.forEach(id => {
+      try {
+        DB.updateCase(id, { source_cs_id: csId });
+        success++;
+      } catch (e) { fail++; }
+    });
+    
+    hideModal();
+    this.state.bulkMode = false;
+    this.state.bulkSelected = [];
+    toast(`✓ ${success} cases dipindah ke CS ${cs.name}${fail > 0 ? ` · ⚠ ${fail} failed` : ''}`);
+    this.render();
+  },
+  
+  async bulkDelete() {
+    const selected = this.state.bulkSelected || [];
+    if (!Permissions.canDelete(Auth.current())) { toast('No permission'); return; }
+    
+    const confirmText = `🚨 DELETE ${selected.length} customers PERMANENTLY?\n\nThis cannot be undone.\nNotification akan dihantar kepada Manager/HQ.\n\nType "DELETE" to confirm:`;
+    const ans = prompt(confirmText);
+    if (ans !== 'DELETE') { toast('Cancelled — confirmation tidak match'); return; }
+    
+    let success = 0, fail = 0;
+    const user = Auth.current();
+    
+    for (const id of selected) {
+      try {
+        const c = DB.caseById(id);
+        if (!c) { fail++; continue; }
+        
+        // Capture before delete
+        const sourceCs = DB.user(c.source_cs_id);
+        const leader = DB.user(c.leader_id);
+        const notifData = {
+          type: 'customer_deleted',
+          severity: 'high',
+          icon: '🗑️',
+          title: 'Customer Deleted (Bulk)',
+          message: `${user.name} bulk-deleted "${c.customer_name}"`,
+          actor_id: user.id,
+          actor_name: user.name,
+          actor_role: user.role,
+          case_id: id,
+          customer_name: c.customer_name,
+          customer_ic: c.ic || '',
+          customer_phone: c.phone || '',
+          case_status: c.status || '',
+          source_cs_name: sourceCs?.name || '',
+          leader_name: leader?.name || '',
+          branch_id: c.branch_id || '',
+          deleted_at: Date.now(),
+          bulk_delete: true
+        };
+        
+        // Delete the case
+        const cases = DB.cases().filter(x => x.id !== id);
+        DB.set(DB.K.cases, cases);
+        if (window.Cloud?.connected) {
+          window.Cloud.deleteDoc('cases', id).catch(console.error);
+        }
+        
+        // Fire notification to relevant people
+        const recipientIds = Logic.getNotifyRecipientsForCase(user.id, c);
+        recipientIds.forEach(uid => DB.addNotification(uid, notifData));
+        
+        success++;
+      } catch (e) { 
+        console.error('Bulk delete error:', e);
+        fail++; 
+      }
+    }
+    
+    hideModal();
+    this.state.bulkMode = false;
+    this.state.bulkSelected = [];
+    toast(`✓ ${success} cases deleted${fail > 0 ? ` · ⚠ ${fail} failed` : ''}`);
+    this.render();
+  },
+  
+  // ============ VIEW STAFF ACTIVITY (Manager dashboard) ============
+  viewStaffActivity(userId) {
+    const u = DB.user(userId);
+    if (!u) return;
+    
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+    const ym = new Date().toISOString().slice(0, 7);
+    
+    // Today's activity
+    const todayAct = DB.todayActivity(userId);
+    // Yesterday's activity
+    const yesterdayAct = DB.activities().find(a => a.cs_id === userId && a.date === yesterdayStr) || { calls: 0, whatsapp: 0, payslip: 0 };
+    
+    // Last 7 days activity
+    const last7 = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const ds = d.toISOString().slice(0, 10);
+      const a = DB.activities().find(x => x.cs_id === userId && x.date === ds) || { calls: 0, whatsapp: 0, payslip: 0 };
+      last7.push({ date: ds, ...a });
+    }
+    
+    // Login activity (from loginAttempts)
+    const attempts = DB.loginAttempts(userId);
+    
+    // Cases stats (this month)
+    let monthCases = DB.cases().filter(c => {
+      if (u.role === 'cs') return c.source_cs_id === userId;
+      if (Logic.isLeaderRole(u)) return c.leader_id === userId || c.source_cs_id === userId;
+      return false;
+    });
+    
+    // Submitted this month
+    const submittedThisMonth = monthCases.filter(c => 
+      c.date_submitted?.startsWith(ym) && c.status !== 'rejected'
+    ).length;
+    const disbursedThisMonth = monthCases.filter(c => 
+      c.date_disbursed?.startsWith(ym)
+    );
+    const disbursedAmount = disbursedThisMonth.reduce((s, c) => s + (c.disbursed_amount || 0), 0);
+    
+    // Settings for daily targets
+    const settings = DB.settings();
+    const targetCalls = settings?.daily_targets?.calls || 250;
+    const targetWA = settings?.daily_targets?.whatsapp || 30;
+    const targetPayslip = settings?.daily_targets?.payslip || 3;
+    
+    const progressBar = (val, target, color) => {
+      const pct = Math.min(100, Math.round((val / target) * 100));
+      return `
+        <div style="background:var(--cream-2);border-radius:8px;height:10px;overflow:hidden;position:relative;">
+          <div style="background:${color};height:100%;width:${pct}%;transition:width 0.3s;"></div>
+        </div>
+        <div style="font-size:10px;color:var(--ink-3);margin-top:2px;">${val} / ${target} (${pct}%)</div>
+      `;
+    };
+    
+    const dayLabels = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const maxLast7 = Math.max(...last7.map(a => Math.max(a.calls, a.whatsapp * 10, a.payslip * 50)), 1);
+    
+    showModal(`
+      <div class="modal-title">📊 ${u.name}'s Activity</div>
+      <div class="modal-sub">${ROLE_LABELS[u.role] || u.role} · ${DB.branch(u.branch_id)?.name || u.branch_id}</div>
+      
+      <!-- TODAY -->
+      <div style="background:var(--cream-2);border-radius:12px;padding:14px;margin:14px 0;border:1px solid var(--border-2);">
+        <div style="font-size:11px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:10px;">📅 Today (${new Date().toLocaleDateString('en-MY', { day: '2-digit', month: 'short' })})</div>
+        ${u.role === 'cs' || Logic.isLeaderRole(u) ? `
+          <div style="margin-bottom:10px;">
+            <div style="font-size:11px;color:var(--ink-2);margin-bottom:3px;">📞 Calls</div>
+            ${progressBar(todayAct.calls || 0, targetCalls, '#3B82F6')}
+          </div>
+          <div style="margin-bottom:10px;">
+            <div style="font-size:11px;color:var(--ink-2);margin-bottom:3px;">💬 WhatsApp</div>
+            ${progressBar(todayAct.whatsapp || 0, targetWA, '#22C55E')}
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--ink-2);margin-bottom:3px;">📋 Payslip</div>
+            ${progressBar(todayAct.payslip || 0, targetPayslip, '#F59E0B')}
+          </div>
+        ` : `
+          <div style="font-size:13px;color:var(--ink-3);font-style:italic;">Activity tracking not applicable for ${ROLE_LABELS[u.role] || u.role}.</div>
+        `}
+      </div>
+      
+      <!-- COMPARISON: Today vs Yesterday -->
+      ${u.role === 'cs' || Logic.isLeaderRole(u) ? `
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:12px 0;">
+          <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:10px;color:var(--ink-3);">Yesterday Calls</div>
+            <div style="font-size:18px;font-weight:800;">${yesterdayAct.calls || 0}</div>
+          </div>
+          <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:10px;color:var(--ink-3);">WA</div>
+            <div style="font-size:18px;font-weight:800;">${yesterdayAct.whatsapp || 0}</div>
+          </div>
+          <div style="background:var(--cream-2);border:1px solid var(--border-2);border-radius:8px;padding:10px;text-align:center;">
+            <div style="font-size:10px;color:var(--ink-3);">Payslip</div>
+            <div style="font-size:18px;font-weight:800;">${yesterdayAct.payslip || 0}</div>
+          </div>
+        </div>
+      ` : ''}
+      
+      <!-- LAST 7 DAYS CHART -->
+      ${u.role === 'cs' || Logic.isLeaderRole(u) ? `
+        <div style="background:var(--cream-2);border-radius:12px;padding:14px;margin:14px 0;border:1px solid var(--border-2);">
+          <div style="font-size:11px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:10px;">📈 Last 7 Days · Calls</div>
+          <div style="display:flex;align-items:flex-end;gap:6px;height:80px;">
+            ${last7.map(a => {
+              const d = new Date(a.date);
+              const h = maxLast7 > 0 ? Math.max(3, Math.round((a.calls / maxLast7) * 70)) : 3;
+              const isToday = a.date === today;
+              return `
+                <div style="flex:1;display:flex;flex-direction:column;align-items:center;">
+                  <div style="background:${isToday ? '#0F5132' : '#94A3B8'};width:100%;height:${h}px;border-radius:4px 4px 0 0;display:flex;align-items:flex-end;justify-content:center;color:white;font-size:9px;font-weight:800;padding:2px 0;">${a.calls || ''}</div>
+                  <div style="font-size:9px;color:var(--ink-3);margin-top:3px;">${dayLabels[d.getDay()]}</div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+      
+      <!-- MONTHLY KPI -->
+      ${u.role === 'cs' || Logic.isLeaderRole(u) ? `
+        <div style="background:var(--cream-2);border-radius:12px;padding:14px;margin:14px 0;border:1px solid var(--border-2);">
+          <div style="font-size:11px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:10px;">📊 Bulan Ini (${new Date().toLocaleDateString('en-MY', { month: 'long', year: 'numeric' })})</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+            <div style="background:var(--cream);border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:var(--ink-3);">Submitted (KPI)</div>
+              <div style="font-size:22px;font-weight:800;color:var(--primary);">${submittedThisMonth}</div>
+            </div>
+            <div style="background:var(--cream);border-radius:8px;padding:10px;text-align:center;">
+              <div style="font-size:10px;color:var(--ink-3);">Disbursed (KFI)</div>
+              <div style="font-size:13px;font-weight:800;color:var(--accent-deep);">RM ${disbursedAmount.toLocaleString()}</div>
+              <div style="font-size:9px;color:var(--ink-3);">${disbursedThisMonth.length} cases</div>
+            </div>
+          </div>
+        </div>
+      ` : ''}
+      
+      <!-- ACCOUNT STATUS -->
+      <div style="background:var(--cream-2);border-radius:12px;padding:14px;margin:14px 0;border:1px solid var(--border-2);">
+        <div style="font-size:11px;color:var(--ink-3);font-weight:800;text-transform:uppercase;letter-spacing:0.12em;margin-bottom:8px;">🔐 Account Status</div>
+        <div style="font-size:12px;line-height:1.6;">
+          <div><strong>Status:</strong> ${u.inactive ? '<span style="color:#DC2626;">⏸ Inactive</span>' : (attempts.lockedAt ? '<span style="color:#DC2626;">🔒 Locked</span>' : '<span style="color:#22C55E;">✓ Active</span>')}</div>
+          <div><strong>Failed login attempts:</strong> ${attempts.count || 0}/3</div>
+          ${u.created_at ? `<div><strong>Created:</strong> ${new Date(u.created_at).toLocaleDateString('en-MY')}</div>` : ''}
+          ${u.resigned_at ? `<div><strong>Resigned:</strong> ${new Date(u.resigned_at).toLocaleDateString('en-MY')}</div>` : ''}
+        </div>
+      </div>
+      
+      <button class="btn-secondary" onclick="App.editUser('${userId}')" style="margin-top:8px;">← Back to Edit</button>
+    `);
+  },
+  
+  // ============ DATA BACKUP (JSON Download) ============
+  downloadBackup() {
+    try {
+      const backup = {
+        version: '1.0',
+        exported_at: new Date().toISOString(),
+        exported_by: Auth.current()?.name || 'unknown',
+        data: {
+          users: DB.users(),
+          cases: DB.cases(),
+          activities: DB.activities(),
+          customer_notes: DB.get(DB.K.customer_notes, {}),
+          koperasi: DB.koperasi(),
+          announcements: DB.announcements(),
+          branches: DB.branches(),
+          settings: DB.settings(),
+          notifications: DB.get(DB.K.notifications, {})
+        }
+      };
+      
+      const json = JSON.stringify(backup, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const today = new Date().toISOString().slice(0, 10);
+      const filename = `AWARA_backup_${today}.json`;
+      
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      const sizeKB = (json.length / 1024).toFixed(1);
+      toast(`✓ Backup downloaded · ${filename} · ${sizeKB} KB`);
+      console.log(`📦 Backup created: ${filename}, ${sizeKB} KB, includes ${backup.data.users.length} users, ${backup.data.cases.length} cases`);
+    } catch (e) {
+      console.error('Backup error:', e);
+      toast('⚠ Backup failed: ' + e.message);
+    }
   },
   
   resetSettings() {
@@ -7817,7 +9838,41 @@ removeListItem(key, idx) {
   },
   
   bindCommonEvents() {
-    // already bound via onclick
+    // Auto-logout after 30 min idle (security)
+    this.setupIdleTimeout();
+  },
+  
+  // ============ SESSION IDLE TIMEOUT (30 min) ============
+  // Auto-logout if user inactive for 30 mins. Re-set on any mouse/keyboard/touch.
+  // Stored in App.state to be reset on every render() also.
+  setupIdleTimeout() {
+    if (this._idleSetup) return;  // only setup once
+    this._idleSetup = true;
+    const IDLE_LIMIT_MS = 30 * 60 * 1000;  // 30 minutes
+    
+    const resetIdleTimer = () => {
+      if (this._idleTimer) clearTimeout(this._idleTimer);
+      const user = Auth.current();
+      if (!user) return;  // not logged in, nothing to do
+      this._idleTimer = setTimeout(() => {
+        const stillLoggedIn = Auth.current();
+        if (!stillLoggedIn) return;
+        // Show warning
+        toast('⏰ Session expired (30 min idle) · Logging out...');
+        setTimeout(() => {
+          Auth.logout();
+          this.state.currentScreen = 'login';
+          this.state.notifFilter = null;
+          this.render();
+        }, 1500);
+      }, IDLE_LIMIT_MS);
+    };
+    
+    // Reset on any user activity
+    ['mousedown', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+      document.addEventListener(evt, resetIdleTimer, { passive: true });
+    });
+    resetIdleTimer();  // start the timer
   }
 };
 
@@ -7969,8 +10024,23 @@ async function bootstrap() {
         const myNotif = items.find(n => n.userId === user.id);
         if (myNotif) {
           const all = DB.get(DB.K.notifications, {});
-          all[user.id] = myNotif.items || [];
+          const prevItems = all[user.id] || [];
+          const prevUnreadIds = new Set(prevItems.filter(n => !n.read).map(n => n.id));
+          const newItems = myNotif.items || [];
+          
+          // Detect newly arrived notifications (not in previous unread set)
+          const arrivedNotifs = newItems.filter(n => !n.read && !prevUnreadIds.has(n.id));
+          
+          all[user.id] = newItems;
           DB.set(DB.K.notifications, all);
+          
+          // Play sound for highest-severity arrival (if any)
+          if (arrivedNotifs.length > 0 && typeof App !== 'undefined' && App.playNotifSound) {
+            const severities = ['high', 'medium', 'low'];
+            const topSeverity = severities.find(s => arrivedNotifs.some(n => n.severity === s)) || 'medium';
+            try { App.playNotifSound(topSeverity); } catch {}
+          }
+          
           debouncedRender();
         }
       });
