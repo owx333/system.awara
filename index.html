@@ -3845,7 +3845,7 @@ ${isAdminLike ? `
                 <div><span style="color: var(--ink-3);">Date Postage:</span> <strong>${c.date_postage ? new Date(c.date_postage).toLocaleDateString('en-MY') : '—'}</strong></div>
                 <div><span style="color: var(--ink-3);">Postage No:</span> <strong>${c.postage_number || '—'}</strong></div>
                 <div style="grid-column: span 2;"><span style="color: var(--ink-3);">Date Receive:</span> <strong>${c.date_receive ? new Date(c.date_receive).toLocaleDateString('en-MY') : '—'}</strong></div>
-                ${c.remark_admin ? `<div style="grid-column: span 2;"><span style="color: var(--ink-3);">Remark Admin:</span> <strong>${c.remark_admin}</strong></div>` : ''}
+                ${c.remark_admin ? `<div style="grid-column: span 2;"><span style="color: var(--ink-3);">Remark Admin:</span> <strong>${c.remark_admin}</strong></div>` ${c.payout_amount ? `<div style="grid-column: span 2;"><span style="color: var(--ink-3);">Payout (RM):</span> <strong>${fmtRM(c.payout_amount)}</strong></div>` : ''}
               </div>
             </div>
           ` : ''}
