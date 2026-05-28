@@ -6426,7 +6426,7 @@ if (!Permissions.canViewAllBranches(user)) {
     // Sort newest first
     cases = cases.sort((a,b) => b.date_payslip.localeCompare(a.date_payslip));
     
-    let leaders = DB.users().filter(u => u.role === 'leader' || u.role === 'solo');
+    let leaders = DB.users().filter(u => u.role === 'leader' || u.role === 'solo' || u.role === 'manager');
     if (!Permissions.canViewAllBranches(user)) {
       leaders = leaders.filter(u => u.branch_id === user.branch_id);
     } else if (filterBranch !== 'all') {
