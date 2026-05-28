@@ -1564,7 +1564,7 @@ const DB = {
     const user = Auth.current();
     
     // Check duplicate by IC
-const existing = cases.filter(c => c.ic === data.ic);
+const existing = cases.filter(c => c.ic === data.ic && c.branch_id === data.branch_id);
 const currentYM = data.date_payslip?.slice(0, 7) || new Date().toISOString().slice(0, 7);
 const sameMonthCase = existing.find(c => c.date_payslip?.slice(0, 7) === currentYM);
 const isDuplicate = !!sameMonthCase;
@@ -5981,7 +5981,8 @@ ${isAdminLike ? `
     
     if (ic.length < 6) { warn.style.display = 'none'; return; }
     
-    const existing = DB.casesByIC(ic);
+    const user = Auth.current();
+    const existing = DB.casesByIC(ic).filter(c => c.branch_id === user.branch_id);
     if (existing.length === 0) {
       warn.style.display = 'none';
       return;
