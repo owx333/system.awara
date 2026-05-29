@@ -6412,8 +6412,12 @@ if (!Permissions.canViewAllBranches(user)) {
       // 'all' = no filter
     }
     
-    // Status filter
-    if (filterStatus !== 'all') cases = cases.filter(c => c.status === filterStatus);
+// Status filter (+ special "duplicate" pseudo-status)
+    if (filterStatus === 'duplicate') {
+      cases = cases.filter(c => c.is_duplicate === true);
+    } else if (filterStatus !== 'all') {
+      cases = cases.filter(c => c.status === filterStatus);
+    }
     
     // Team filter
     if (filterTeam !== 'all') cases = cases.filter(c => c.leader_id === filterTeam);
@@ -6528,8 +6532,8 @@ if (!Permissions.canViewAllBranches(user)) {
       </div>` : ''}
 
       <div class="filter-bar">
-        ${['all','new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected'].map(s => 
-          `<div class="filter-chip ${filterStatus === s ? 'active' : ''}" onclick="App.setFilter('adminCust','${s}')">${s === 'all' ? 'All Status' : STATUS_LABELS[s]}</div>`
+        ${['all','new','contacted','proposed','submitted','approved','disbursed','pending','potential','on_hold','rejected','duplicate'].map(s => 
+          `<div class="filter-chip ${filterStatus === s ? 'active' : ''}" onclick="App.setFilter('adminCust','${s}')" ${s === 'duplicate' ? 'style="background: #FEE2E2; color: #991B1B; border-color: #FCA5A5;"' : ''}>${s === 'all' ? 'All Status' : s === 'duplicate' ? '⚠ Duplicates' : STATUS_LABELS[s]}</div>`
         ).join('')}
       </div>
       
